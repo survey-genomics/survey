@@ -1,0 +1,3 @@
+# survey
+
+The **survey** toolkit is designed to process and analyze spatially-hashed single-cell data as produced by the Survey Genomics assay. The core object is the MuData object ([docs](https://github.com/scverse/mudata), [repo](https://mudata.readthedocs.io/en/latest/#)) which stores single-cell data, spatial hash data, and any other modalities assayed concurrently (like cell surface protein expression).
