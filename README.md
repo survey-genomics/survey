@@ -12,10 +12,10 @@
 The **Survey** toolkit is designed to process and analyze spatially-hashed single-cell data produced by the Survey Genomics assay. The core object is a MuData object ([docs](https://github.com/scverse/mudata), [repo](https://mudata.readthedocs.io/en/latest/#)) which stores single-cell data, spatial hash data, and any other modalities assayed concurrently (e.g. surface protein expression).
 
 
-# System Requirements
+## System Requirements
 Survey has been tested using Python 3.10 on MacOS and Ubuntu Linux.
 
-# Installation
+## Installation
 
 1. [Install mamba (or the latest conda).](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html)
 
@@ -32,7 +32,7 @@ Survey has been tested using Python 3.10 on MacOS and Ubuntu Linux.
     pip install .
     ```
 
-# Environment File
+## Environment File
 
 The environment file has been configured for analysis in Jupyter Lab, tested within VS Code (Version: 1.103.1, Universal) using the extensions for Jupyter (version 2025.7.0) and Jupyter Powertoys (version 0.1.1). To recreate it, the following installations (beyond the dependencies listed in `pyproject.toml`) were performed, in order:
 
@@ -46,6 +46,6 @@ mamba install -c conda-forge ipympl
 ```
 
 
-# Support
+## Support
 
 Please report issues or feature requests via GitHub.
