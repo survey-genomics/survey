@@ -14,7 +14,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11"] # Test across multiple Python versions
+        python-version: ["3.10.0", "3.11.0"] # Test across multiple Python versions
         # You might add "3.12" if your code is compatible
 
     steps:
