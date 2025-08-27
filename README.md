@@ -32,6 +32,18 @@ Survey has been tested using Python 3.10 on MacOS and Ubuntu Linux.
     pip install .
     ```
 
+# Environment File
+
+The environment file has been configured for analysis in Jupyter Lab, tested within VS Code (Version: 1.103.1, Universal) using the extensions for Jupyter (version 2025.7.0) and Jupyter Powertoys (version 0.1.1). To recreate it, the following installations (beyond the dependencies listed in `pyproject.toml`) were performed, in order:
+
+```
+mamba install ipykernel=6.29.5
+python -m ipykernel install --user --name survey-env --display-name "survey-env"
+mamba install bioconda::harmonypy==0.0.10
+mamba install -c conda-forge ipywidgets
+mamba install tqdm
+mamba install -c conda-forge ipympl
+```
 
 
 # Support
