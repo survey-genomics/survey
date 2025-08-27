@@ -22,6 +22,7 @@ Survey has been tested using Python 3.10 on MacOS and Ubuntu Linux.
 2. Clone this repository and create a conda environment from the `environment.yml` file:
 
     ```
+    cd survey/
     mamba env create -f environment.yml
     mamba activate survey-env
     ```
@@ -29,20 +30,26 @@ Survey has been tested using Python 3.10 on MacOS and Ubuntu Linux.
 3. Then, install the package using pip:
 
     ```
-    pip install .
+    (survey-env) pip install .
     ```
 
 ## Environment File
 
-The environment file has been configured for analysis in Jupyter Lab, tested within VS Code (Version: 1.103.1, Universal) using the extensions for Jupyter (version 2025.7.0) and Jupyter Powertoys (version 0.1.1). To recreate it, the following installations (beyond the dependencies listed in `pyproject.toml`) were performed, in order:
+The environment file has been configured for analysis in Jupyter Lab, tested within VS Code (Version: 1.103.1, Universal) using the extensions for Jupyter (version 2025.7.0) and Jupyter Powertoys (version 0.1.1). To recreate it, the following installations (beyond the dependencies listed in `pyproject.toml`) were performed, in order (all within survey-env):
 
 ```
-mamba install ipykernel=6.29.5
+mamba install bioconda::harmonypy==0.0.10 # harmony integration/batch correction
+mamba install -c conda-forge python-igraph==0.11.5 # clustering
+mamba install ipykernel=6.29.5 # Jupyter Lab
+mamba install -c conda-forge ipywidgets # for tqdm and other notebook-rendered tools
+mamba install tqdm # loading bar for long processes
+mamba install -c conda-forge ipympl # in-notebook segmentation using mpl interactive
+```
+
+To use the environment as a python kernel for Jupyter Lab:
+
+```
 python -m ipykernel install --user --name survey-env --display-name "survey-env"
-mamba install bioconda::harmonypy==0.0.10
-mamba install -c conda-forge ipywidgets
-mamba install tqdm
-mamba install -c conda-forge ipympl
 ```
 
 

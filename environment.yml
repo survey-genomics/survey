@@ -7,6 +7,7 @@ dependencies:
   - _libgcc_mutex=0.1=main
   - _openmp_mutex=5.1=1_gnu
   - aom=3.6.0=h6a678d5_0
+  - arpack=3.9.1=nompi_hf03ea27_102
   - asttokens=3.0.0=py310h06a4308_0
   - blas=1.0=mkl
   - bottleneck=1.4.2=py310ha9d4c09_0
@@ -21,12 +22,15 @@ dependencies:
   - dav1d=1.2.1=hd590300_0
   - debugpy=1.8.11=py310h6a678d5_0
   - decorator=5.1.1=pyhd3eb1b0_0
+  - exceptiongroup=1.3.0=pyhd8ed1ab_0
   - executing=0.8.3=pyhd3eb1b0_0
   - expat=2.7.1=h6a678d5_0
   - fontconfig=2.14.1=h55d465d_3
   - fonttools=4.59.1=py310h3406613_0
   - freetype=2.13.3=h4a9f257_0
   - fribidi=1.0.10=h36c2ea0_0
+  - glpk=5.0=h445213a_0
+  - gmp=6.3.0=hac33072_2
   - graphite2=1.3.14=hecca717_2
   - harfbuzz=10.2.0=hdfddeaa_1
   - harmonypy=0.0.10=pyhdfd78af_0
@@ -47,6 +51,7 @@ dependencies:
   - ld_impl_linux-64=2.40=h12ee557_0
   - lerc=4.0.0=h0aef613_1
   - libavif=1.1.1=h5eee18b_0
+  - libblas=3.9.0=1_h86c2bf4_netlib
   - libbrotlicommon=1.1.0=hb9d3cd8_3
   - libbrotlidec=1.1.0=hb9d3cd8_3
   - libbrotlienc=1.1.0=hb9d3cd8_3
@@ -54,22 +59,24 @@ dependencies:
   - libffi=3.4.4=h6a678d5_1
   - libgcc=15.1.0=h767d61c_4
   - libgcc-ng=15.1.0=h69a702a_4
-  - libgfortran-ng=11.2.0=h00389a5_1
-  - libgfortran5=11.2.0=h1234567_1
+  - libgfortran=15.1.0=h69a702a_4
+  - libgfortran-ng=15.1.0=h69a702a_4
+  - libgfortran5=15.1.0=hcea5267_4
   - libglib=2.84.2=h37c7471_0
   - libgomp=15.1.0=h767d61c_4
   - libiconv=1.18=h3b78370_2
+  - liblapack=3.9.0=12_hd37a5e2_netlib
   - libpng=1.6.39=h5eee18b_0
   - libsodium=1.0.18=h7b6447c_0
   - libstdcxx=15.1.0=h8f9b012_4
-  - libstdcxx-ng=11.2.0=h1234567_1
+  - libstdcxx-ng=15.1.0=h4852527_4
   - libtiff=4.7.0=hde9077f_0
   - libuuid=1.41.5=h5eee18b_0
   - libwebp-base=1.6.0=hd42ef1d_0
   - libxcb=1.17.0=h9b100fa_0
   - libxml2=2.13.8=hfdd30dd_0
+  - libzlib=1.2.13=h4ab18f5_6
   - lz4-c=1.9.4=h6a678d5_1
-  - matplotlib-base=3.10.1=py310h68603db_0
   - matplotlib-inline=0.1.6=py310h06a4308_0
   - mkl=2023.1.0=h213fc3f_46344
   - mkl-service=2.4.0=py310h5eee18b_2
@@ -79,7 +86,6 @@ dependencies:
   - ncurses=6.5=h7934f7d_0
   - nest-asyncio=1.6.0=py310h06a4308_0
   - numexpr=2.11.0=py310hf4471f9_0
-  - numpy-base=2.0.1=py310hb5e798b_1
   - openjpeg=2.5.2=h0d4d230_1
   - openssl=3.5.2=h26f9b46_0
   - packaging=25.0=py310h06a4308_0
@@ -100,6 +106,7 @@ dependencies:
   - pyparsing=3.2.3=pyhe01879c_2
   - python=3.10.18=h1a3bd86_0
   - python-dateutil=2.9.0post0=py310h06a4308_2
+  - python-igraph=0.11.5=py310h0d84dc0_1
   - python-tzdata=2025.2=pyhd3eb1b0_0
   - python_abi=3.10=2_cp310
   - pytz=2025.2=py310h06a4308_0
@@ -113,11 +120,12 @@ dependencies:
   - sqlite=3.50.2=hb25bd0a_1
   - stack_data=0.2.0=pyhd3eb1b0_0
   - tbb=2021.8.0=hdb19cb5_0
+  - texttable=1.7.0=pyhd8ed1ab_1
+  - threadpoolctl=3.6.0=pyhecae5ae_0
   - tk=8.6.15=h54e0aa7_0
   - tornado=6.5.1=py310h5eee18b_0
   - tqdm=4.67.1=py310h2f386ee_0
   - traitlets=5.14.3=py310h06a4308_0
-  - typing_extensions=4.12.2=py310h06a4308_0
   - tzdata=2025b=h04d1e81_0
   - unicodedata2=16.0.0=py310ha75aee5_0
   - wcwidth=0.2.13=py310h06a4308_0
@@ -131,13 +139,12 @@ dependencies:
   - xorg-xorgproto=2024.1=h5eee18b_1
   - xz=5.6.4=h5eee18b_1
   - zeromq=4.3.5=h6a678d5_0
-  - zlib=1.2.13=h5eee18b_1
+  - zlib=1.2.13=h4ab18f5_6
   - zstd=1.5.6=hc292b87_0
   - pip:
       - anndata==0.11.4
       - anytree==2.12.1
       - array-api-compat==1.12.0
-      - exceptiongroup==1.3.0
       - h5py==3.14.0
       - imageio==2.37.0
       - lazy-loader==0.4
@@ -158,7 +165,6 @@ dependencies:
       - session-info==1.0.1
       - statsmodels==0.14.5
       - stdlib-list==0.11.1
-      - threadpoolctl==3.6.0
       - tifffile==2025.5.10
       - typing-extensions==4.15.0
       - umap-learn==0.5.9.post2
