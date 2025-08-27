@@ -2,7 +2,7 @@
 
 <p align="center">
     <picture align="center">
-    <img src="https://lh6.googleusercontent.com/_fii7dyosWF9CYMkraJ0kC3-iuOnL2gH1VmVe8k8dnQXTzgQQp4D95hBArCzf5pjbJuZfx4rZ2NF682aGO9MZI9NRSzmItMsE4ZU8MlvMFKsLFDYkn9CXSMSQadvawPUaak8zKbE88hxrWTfLVTtjnNL9DZeY-oh0XvJUiKwrMj-o3hzOLFsTQ=w1280" width="100px">
+    <img src="https://github.com/survey-genomics/survey/blob/main/assets/logo_shine%405x.png" width="100px">
     </picture>
 </p>
 <p align="center">
