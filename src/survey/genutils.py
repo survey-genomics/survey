@@ -1,53 +1,70 @@
+# Built-ins
 from pathlib import Path
 import re
-from typing import (
-    Any, List, Union, Optional, Tuple, Sequence
-)
+from typing import List, Union, Optional, Tuple, Sequence, Any, Dict, Callable
 import warnings
 from inspect import signature, Parameter
 import pickle as pkl
+from numbers import Number
 
+# Standard libs
 import numpy as np
 import pandas as pd
-import matplotlib as mpl
-import scanpy as sc
-import mudata as md
 
 
-def make_logspace(start, stop, num, endpoint=True, dtype=None, axis=0):
-    '''
-    Wrapper for np.logspace but input unlogged start and stop. Because
-    unlogged data is provided, base parameter is irrelevant and therefore
-    not inputtable.
-    
-    start : array_like
-        ``log(start)`` is the starting value of the sequence.
-    stop : array_like
-        ``log(stop)`` is the final value of the sequence, unless `endpoint`
-        is False.  In that case, ``num + 1`` values are spaced over the
-        interval in log-space, of which all but the last (a sequence of
-        length `num`) are returned.
-    num : integer, optional
-        Number of samples to generate.  Default is 50.
-    endpoint : boolean, optional
-        If true, `stop` is the last sample. Otherwise, it is not included.
-        Default is True.
-    dtype : dtype
-        The type of the output array.  If `dtype` is not given, infer the data
-        type from the other input arguments.
+def make_logspace(start: Number,
+                  stop: Number,
+                  num: int,
+                  endpoint: bool = True,
+                  dtype: Optional[np.dtype] = None,
+                  axis: int = 0) -> np.ndarray:
+    """
+    Creates a sequence of numbers that are evenly spaced on a log scale.
+
+    This is a wrapper for `numpy.logspace` that accepts the start and stop
+    values in their original (un-logged) scale.
+
+    Parameters
+    ----------
+    start : Number
+        The starting value of the sequence. Must be > 0.
+    stop : Number
+        The final value of the sequence, unless `endpoint` is False.
+    num : int
+        The number of samples to generate.
+    endpoint : bool, optional
+        If True, `stop` is the last sample. Otherwise, it is not included.
+    dtype : np.dtype, optional
+        The data type of the output array.
     axis : int, optional
-        The axis in the result to store the samples.  Relevant only if start
-        or stop are array-like.  By default (0), the samples will be along a
-        new axis inserted at the beginning. Use -1 to get an axis at the end.
+        The axis in the result to store the samples.
 
-
-    returns: `num` samples, equally spaced on a log scale.
-    ''' 
+    Returns
+    -------
+    np.ndarray
+        An array of `num` samples, equally spaced on a log scale.
+    """
 
     return np.logspace(start=np.log10(start), stop=np.log10(stop), num=num, endpoint=endpoint, dtype=dtype, axis=axis)
     
 
-def is_listlike(obj):
+def is_listlike(obj: Any) -> bool:
+    """
+    Checks if an object is list-like.
+
+    An object is considered list-like if it is an instance of list, set, tuple,
+    numpy.ndarray, or pandas.Series, but not a string.
+
+    Parameters
+    ----------
+    obj : Any
+        The object to check.
+
+    Returns
+    -------
+    bool
+        True if the object is list-like, False otherwise.
+    """
     return isinstance(obj, (list, set, tuple, np.ndarray, pd.Series)) and not isinstance(obj, str)
 
 
@@ -104,25 +121,26 @@ def is_filepath_available(filepath: Union[str, Path]) -> Tuple[bool, Optional[st
     return (True, None)
 
 
-def generate_unique_barcodes(
-        n: int, 
-        length: int=16) -> List[str]:
+def generate_unique_barcodes(n: int,
+                             length: int = 16) -> List[str]:
     """
-    Generates a list of n unique cell barcodes using numpy.random.
+    Generates a list of n unique random DNA barcodes.
 
-    Each barcode consists of a 16-nucleotide sequence from 'A', 'C', 'G', 'T'
-    followed by '-1'. The function guarantees that all generated
+    Each barcode consists of a sequence of 'A', 'C', 'G', 'T' of a specified
+    length, followed by '-1'. The function guarantees that all generated
     barcodes in the list are unique.
 
     Parameters
     ----------
     n : int
         The number of unique barcodes to generate.
+    length : int, optional
+        The length of the nucleotide sequence part of the barcode.
 
     Returns
     -------
     List[str]
-        A list containing n unique cell barcodes.
+        A list containing n unique barcodes.
     """
     nucleotides = np.array(list("ACGT"))
     barcodes = set()
@@ -139,20 +157,28 @@ def generate_unique_barcodes(
 
 
 class UniqueDataFrame(pd.DataFrame):
+    """
+    A pandas DataFrame subclass that enforces unique index and columns.
+
+    This class raises a `ValueError` if an attempt is made to create or modify
+    the DataFrame with duplicate values in either the index or the columns.
+    """
     
     @property
-    def _constructor(self):
+    def _constructor(self) -> Callable[..., 'UniqueDataFrame']:
         """Ensures that methods returning a new DataFrame also create a UniqueDataFrame."""
         return UniqueDataFrame
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Initializes the UniqueDataFrame and validates uniqueness.
+        """
         super().__init__(*args, **kwargs)
         self._validate_uniqueness()
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any) -> None:
         """
-        Intercepts attribute setting to enforce uniqueness for 'columns' and 'index'
-        before the assignment happens.
+        Intercepts attribute setting to enforce uniqueness for 'columns' and 'index'.
         """
         if name == 'columns':
             self._validate_unique_columns(value)
@@ -161,18 +187,18 @@ class UniqueDataFrame(pd.DataFrame):
             
         super().__setattr__(name, value)
 
-    def _validate_uniqueness(self):
-        """Helper method to check both index and columns."""
+    def _validate_uniqueness(self) -> None:
+        """Helper method to check both index and columns for uniqueness."""
         self._validate_unique_columns(self.columns)
         self._validate_unique_index(self.index)
 
-    def _validate_unique_columns(self, columns):
+    def _validate_unique_columns(self, columns: pd.Index) -> None:
         """Raises ValueError if columns are not unique."""
         if not pd.Index(columns).is_unique:
             duplicates = pd.Index(columns)[pd.Index(columns).duplicated()].unique()
             raise ValueError(f"Columns must be unique. Found duplicate(s): {list(duplicates)}")
 
-    def _validate_unique_index(self, index):
+    def _validate_unique_index(self, index: pd.Index) -> None:
         """Raises ValueError if the index is not unique."""
         if not pd.Index(index).is_unique:
             duplicates = pd.Index(index)[pd.Index(index).duplicated()].unique()
@@ -225,9 +251,34 @@ def reorder_like(a: Sequence, b: Sequence) -> List:
     return in_b + not_in_b
 
 
-def get_config(user_config, default_config, *, protected=None):
+def get_config(user_config: Optional[Dict],
+               default_config: Dict,
+               *,
+               protected: Optional[set] = None) -> Dict:
     """
-    Merges configs, protecting specified keys. Defaults to None pattern.
+    Merges a user configuration with a default configuration.
+
+    This function safely combines two dictionaries, allowing defaults to be
+    overridden by user settings, except for keys specified as `protected`.
+
+    Parameters
+    ----------
+    user_config : dict, optional
+        The user-provided configuration dictionary.
+    default_config : dict
+        The default configuration dictionary.
+    protected : set, optional
+        A set of keys in the default configuration that cannot be overridden.
+
+    Returns
+    -------
+    dict
+        The merged configuration dictionary.
+
+    Raises
+    ------
+    ValueError
+        If `user_config` attempts to override a protected key.
     """
     # Create an empty set if none was provided
     if protected is None:
@@ -249,14 +300,30 @@ def get_config(user_config, default_config, *, protected=None):
 
 class ParamManager:
     """
-    Manages, validates, and resolves complex parameter sets based on a
-    pre-defined set of rules.
+    Manages, validates, and resolves complex parameter sets for function calls.
+
+    This class provides a structured way to handle function parameters by
+    defining defaults, validation rules, and relationships between different
+    types of parameters (direct, meta, auxiliary).
+
+    Parameters
+    ----------
+    defaults : list or dict
+        A structure defining the parameters, their default values, types,
+        and validation rules.
+    func : callable, optional
+        The target function whose signature will be used for validation.
+    error_on : list, optional
+        A list of parameter names that are forbidden in user input.
     """
 
     REQUIRED_KEYS = ['value', 'type', 'prop', 'setter', 'error']
     REQUIRED_TYPES = ['d', 'm', 'a']
 
-    def __init__(self, defaults, func=None, error_on=[]):
+    def __init__(self,
+                 defaults: Union[List, Dict],
+                 func: Optional[Callable] = None,
+                 error_on: List = []) -> None:
         if isinstance(defaults, list):
             defaults = self.list_to_dict(defaults)
         self._validate_defaults_and_func(defaults, func)
@@ -264,7 +331,20 @@ class ParamManager:
         self.error_on = error_on
 
 
-    def list_to_dict(self, defaults):
+    def list_to_dict(self, defaults: List) -> Dict:
+        """
+        Converts a list-based defaults definition to a dictionary.
+
+        Parameters
+        ----------
+        defaults : list
+            The list of parameter definitions.
+
+        Returns
+        -------
+        dict
+            The dictionary of parameter definitions.
+        """
         if not isinstance(defaults, list):
             raise TypeError("Defaults must be a list.")
         if not all(isinstance(i, list) and len(i) == 1 + len(self.REQUIRED_KEYS) for i in defaults):
@@ -275,10 +355,25 @@ class ParamManager:
         return defaults_dict
         
 
-    def _validate_defaults_and_func(self, defaults, func, warn_on_kwargs=False):
-            """Internal method to validate the defaults dict and check for conflicts with the func signature."""
-            if not isinstance(defaults, dict):
-                raise TypeError("Defaults must be a dictionary.")
+    def _validate_defaults_and_func(self,
+                                    defaults: Dict,
+                                    func: Optional[Callable],
+                                    warn_on_kwargs: bool = False) -> None:
+        """
+        Validates the defaults dictionary and checks for conflicts with a function signature.
+
+        Parameters
+        ----------
+        defaults : dict
+            The defaults dictionary to validate.
+        func : callable, optional
+            The function to validate against.
+        warn_on_kwargs : bool, optional
+            If True, warns if the function accepts `**kwargs`, which can limit
+            validation accuracy.
+        """
+        if not isinstance(defaults, dict):
+            raise TypeError("Defaults must be a dictionary.")
 
             # --- Part 1: Standard validation of the defaults dictionary ---
 
@@ -327,13 +422,24 @@ class ParamManager:
                     )
 
 
-    def get_params(self, user_params=None):
+    def get_params(self, user_params: Optional[Dict] = None) -> Dict:
         """
-        Resolves parameters based on defaults and user-provided inputs.
-        
-        This follows a two-stage process:
-        1. Resolve default values, warning on any internal conflicts.
-        2. Update with user values, warning on any user-specified conflicts.
+        Resolves the final parameter set based on defaults and user input.
+
+        This method follows a two-stage process:
+        1. Resolve default values, handling meta-parameters and their effects.
+        2. Update with user-provided values, overriding defaults and handling
+           user-specified meta-parameters.
+
+        Parameters
+        ----------
+        user_params : dict, optional
+            A dictionary of user-provided parameters.
+
+        Returns
+        -------
+        dict
+            The final, resolved dictionary of parameters to be passed to a function.
         """
         if user_params is None:
             user_params = {}
@@ -408,8 +514,22 @@ class ParamManager:
         return params
     
 
-    def _check_for_errors(self, final_params, user_params):
-        """Checks for user-defined error conditions on the final parameter set."""
+    def _check_for_errors(self, final_params: Dict, user_params: Dict) -> None:
+        """
+        Checks the final parameter set against user-defined error conditions.
+
+        Parameters
+        ----------
+        final_params : dict
+            The fully resolved parameter dictionary.
+        user_params : dict
+            The original user-provided parameters.
+
+        Raises
+        ------
+        ValueError
+            If a forbidden parameter is found or if a conflict rule is triggered.
+        """
         for param in final_params:
             if param in self.error_on:
                 raise ValueError(self.error_on[param])
@@ -436,16 +556,22 @@ class ParamManager:
                     raise ValueError(f"Parameter conflict: {message}")
                 
 
-def get_mask(df, filters):
-
+def get_mask(df: pd.DataFrame, filters: Dict[str, List]) -> pd.Series:
     """
-    Provides a boolean mask to filter a DataFrame.
+    Creates a boolean mask to filter a DataFrame based on multiple criteria.
 
-    Args:
-        df (pd.DataFrame): The DataFrame to filter.
-        filters (dict): A dictionary where keys are column names
-                        and values are lists of items to check for
-                        inclusion in that column.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The DataFrame to be filtered.
+    filters : dict
+        A dictionary where keys are column names and values are lists of
+        items to include for that column.
+
+    Returns
+    -------
+    pd.Series
+        A boolean Series that can be used to index the DataFrame.
     """
     # Start with a mask that includes all rows
     mask = pd.Series(True, index=df.index)
@@ -457,20 +583,29 @@ def get_mask(df, filters):
     return mask
 
 
-def pklop(*args):
+def pklop(*args: Any) -> Optional[Any]:
     """
-    Saves or loads a pickle file based on the number of arguments.
+    Saves or loads a Python object to/from a pickle file.
 
-    Args:
-        *args: Variable length argument list.
-            - To save: Provide the object and the file path (e.g., pickle_op(my_obj, 'file.pkl')).
-            - To load: Provide only the file path (e.g., my_obj = pickle_op('file.pkl')).
+    This function acts as a simple wrapper around the `pickle` module.
+    - To save: `pklop(my_object, 'file.pkl')`
+    - To load: `my_object = pklop('file.pkl')`
 
-    Returns:
+    Parameters
+    ----------
+    *args : Any
+        - If one argument is provided, it is treated as the file path to load from.
+        - If two arguments are provided, they are treated as `(object_to_save, file_path)`.
+
+    Returns
+    -------
+    Any or None
         The loaded object if in 'load' mode, otherwise None.
-        
-    Raises:
-        ValueError: If the number of arguments is not 1 or 2.
+
+    Raises
+    ------
+    ValueError
+        If the number of arguments is not 1 or 2, or if the file path is invalid.
     """
 
     def _check_path(path):
@@ -499,3 +634,5 @@ def pklop(*args):
             return pkl.load(f)
     else:
         raise ValueError("Function accepts 1 argument (path) to load or 2 arguments (object, path) to save.")
+    
+    

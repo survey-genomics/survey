@@ -1,16 +1,43 @@
 # Built-ins
 import re
+from typing import Dict, Tuple, Union, Optional
 
 # Standard libs
 import pandas as pd
 
-def get_chipset_params(meta_rxn):
-    '''
-    Extracts array parameters and chip metadata from a metadata pandas DataFrame.
-    This DataFrame is typically created during Survey Genomics data processing,
-    created from our Compiled Results spreadsheet. It has a specific structure
-    and set of columns that are expected.
-    '''
+def get_chipset_params(meta_rxn: pd.DataFrame) -> Tuple[Dict, pd.DataFrame]:
+    """
+    Extracts array parameters and chip metadata from a reaction metadata DataFrame.
+
+    This function parses a DataFrame, typically derived from a "Compiled Results"
+    spreadsheet in Survey Genomics data processing, to create the necessary
+    parameter dictionaries for constructing `ChipSet` objects.
+
+    Parameters
+    ----------
+    meta_rxn : pd.DataFrame
+        A DataFrame containing reaction metadata with expected columns like
+        'chip-version', 'well-shape', 'chip-num', 'layout-id', etc.
+
+    Returns
+    -------
+    array_params : dict
+        A dictionary where keys are chip versions and values are dictionaries
+        of the physical array parameters (n, s, w, arr_shape).
+    chip_meta : pd.DataFrame
+        A DataFrame indexed by chip number containing metadata for each chip,
+        such as version, layout ID, and offset.
+
+    Raises
+    ------
+    KeyError
+        If required columns are missing from the input DataFrame.
+    ValueError
+        If there are inconsistencies in the metadata, such as multiple
+        different definitions for the same chip version or invalid offset formats.
+    TypeError
+        If `meta_rxn` is not a pandas DataFrame.
+    """
 
     shape_to_n = {
         'Square': 4,
@@ -31,17 +58,42 @@ def get_chipset_params(meta_rxn):
         'image_file': 'img',
     }
 
-    def convert_offset(offset_string, match=False):
+    def convert_offset(offset_string: str, match: bool = False) -> Union[Tuple[int, int], Optional[re.Match]]:
         """
-        Validates the format of the offset string.
-        Expected format: '(x, y)' where x and y are integers.
+        Converts or validates an offset string '(x, y)'.
+
+        Parameters
+        ----------
+        offset_string : str
+            The string to process, e.g., '(0, 1)'.
+        match : bool, optional
+            If True, validates the string format and returns a regex match
+            object or None. If False, converts the string to a tuple of ints.
+
+        Returns
+        -------
+        tuple of (int, int) or re.Match or None
+            The converted tuple or the result of the regex match.
         """
         if match:
             return re.match(r'^\(\s*\d+\s*,\s*\d+\s*\)$', offset_string)
         else:
             return tuple([int(i.strip()) for i in offset_string.strip('()').split(',')])
         
-    def get_array_params(meta_rxn):
+    def get_array_params(meta_rxn: pd.DataFrame) -> Dict:
+        """
+        Extracts and formats physical array parameters from the metadata.
+
+        Parameters
+        ----------
+        meta_rxn : pd.DataFrame
+            The reaction metadata DataFrame.
+
+        Returns
+        -------
+        dict
+            A dictionary of array parameters, keyed by chip version.
+        """
 
         array_params_cols = ['chip-version', 'well-shape', 'well-side-length', 'wall-width', 'arr-num-rows', 'arr-num-cols']
         try:
@@ -68,7 +120,20 @@ def get_chipset_params(meta_rxn):
             array_params[chip_version]['arr_shape'] = arr_shape
         return array_params
     
-    def get_chip_meta(meta_rxn):
+    def get_chip_meta(meta_rxn: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extracts and formats chip-specific metadata.
+
+        Parameters
+        ----------
+        meta_rxn : pd.DataFrame
+            The reaction metadata DataFrame.
+
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame of chip metadata, indexed by chip number.
+        """
 
         chip_meta = meta_rxn[~meta_rxn['chip-num'].duplicated()].reset_index()[list(chip_meta_cols_mapper.keys())].rename(columns=chip_meta_cols_mapper).set_index('num')
         chip_meta.index = chip_meta.index.astype(int)

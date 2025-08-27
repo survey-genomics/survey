@@ -4,40 +4,49 @@ import re
 from typing import (
     Optional, Tuple, List, Any, Union, Dict
 )
+import colorsys
+from numbers import Number
 
 # Standard libs
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-
-# Special libs
-import colorsys
 from PIL import Image
 
-
 # Survey libs
-from .genutils import make_logspace
+from survey.genutils import make_logspace
 
 
-def loglog_hist(
-        vals, 
-        binminmax, 
-        numbins=100, 
-        vline=None, 
-        title=None, 
-        ax=None):
-    '''
-    Plot a log-lob histogram of a list-like of values.
-    
-    `vals`: list-like of values, fed directly to ax.hist()
-    `binminmax`: 2-tuple of x axis bins minimum (should be > 0, since log-bins) and maximum
-    `numbins`: number of bins for the x axis of the histogram
-    `vline`: (optional) x location of a black vertical line
-    `title`: (optional) title for the Axes
-    `ax`: (optional) matplotlib.pyplot.Axes on which to plot the histogram
-    
-    returns: matplotlib.pyplot.Axes with plotted loglog histogram
-    ''' 
+def loglog_hist(vals: np.ndarray,
+                binminmax: Tuple[Number, Number],
+                numbins: int = 100,
+                vline: Optional[Number] = None,
+                title: Optional[str] = None,
+                ax: Optional[plt.Axes] = None) -> plt.Axes:
+    """
+    Plot a log-log histogram of a list-like of values.
+
+    Parameters
+    ----------
+    vals : np.ndarray
+        An array of values to be binned and plotted.
+    binminmax : tuple of (Number, Number)
+        A tuple specifying the minimum and maximum range for the histogram bins.
+        The minimum value must be greater than 0 for a log scale.
+    numbins : int, optional
+        The number of bins to create for the histogram.
+    vline : Number, optional
+        If provided, draws a vertical line at this x-coordinate.
+    title : str, optional
+        The title for the plot's axes.
+    ax : plt.Axes, optional
+        An existing Matplotlib Axes object to plot on. If None, a new one is created.
+
+    Returns
+    -------
+    plt.Axes
+        The Axes object containing the log-log histogram.
+    """ 
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=(4, 3))
         
@@ -47,25 +56,23 @@ def loglog_hist(
     ax.grid(which='both', alpha=0.5)
     ax.set_title(title)
     
-    if vline is None:
+    if vline is not None:
         ylim = ax.get_ylim()
         ax.vlines(vline, ylim[0], ylim[1], color='k')
         
     return ax
 
 
-def subplots(
-    nplots: int,
-    ncols: int = None,
-    cols: Optional[int] = None,
-    ar: float = None,
-    fss: Optional[float] = None,
-    split_each: Optional[Tuple[int, int]] = None,
-    hrs: Optional[List[float]] = None,
-    wrs: Optional[List[float]] = None,
-    as_seq: bool = False,
-    **kwargs: Any,
-) -> Tuple[mpl.figure.Figure, Union[mpl.axes.Axes, np.ndarray]]:
+def subplots(nplots: int,
+             ncols: Optional[int] = None,
+             cols: Optional[int] = None,
+             ar: Optional[float] = None,
+             fss: Optional[float] = None,
+             split_each: Optional[Tuple[int, int]] = None,
+             hrs: Optional[List[float]] = None,
+             wrs: Optional[List[float]] = None,
+             as_seq: bool = False,
+             **kwargs: Any) -> Tuple[mpl.figure.Figure, Union[mpl.axes.Axes, np.ndarray]]:
     """Create a matplotlib figure and axes objects.
 
     Creates a grid of subplots with a specified number of plots,
@@ -176,7 +183,38 @@ def subplots(
     return fig, axes
 
 
-def get_inset_ax_params(pos, ax, width, height):
+def get_inset_ax_params(pos: str,
+                        ax: plt.Axes,
+                        width: float,
+                        height: float) -> Tuple[List[float], float, Tuple[str, ...], Tuple[bool, ...]]:
+    """
+    Calculates parameters for creating an inset axes within a parent axes.
+
+    Parameters
+    ----------
+    pos : str
+        The corner position for the inset axes ('lower left', 'upper right', etc.).
+    ax : plt.Axes
+        The parent axes object.
+    width : float
+        The width of the inset axes, as a fraction of the parent axes' width.
+    height : float
+        The height of the inset axes, as a fraction of the parent axes' height.
+
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        - `rect`: A list `[left, bottom, width, height]` for the new axes.
+        - `yadjust_pos`: A float for adjusting y-tick positions.
+        - `yk`: A tuple of y-tick parameter keys.
+        - `yv`: A tuple of y-tick parameter boolean values.
+
+    Raises
+    ------
+    ValueError
+        If `pos` is not a valid corner position.
+    """
     # yk, yv = y-tick parameters keys, values
     yk = "labelleft", "labelright", "left", "right"
 
@@ -204,14 +242,13 @@ def get_inset_ax_params(pos, ax, width, height):
     return rect, yadjust_pos, yk, yv
 
 
-def cbar_in_axes(
-    fig: mpl.figure.Figure,
-    ax: mpl.axes.Axes,
-    pos: Optional[str] = None,
-    shape: Optional[Tuple[float, float]] = None,
-    cax: Optional[mpl.axes.Axes] = None,
-) -> Tuple[mpl.axes.Axes, float, Dict[str, bool]]:
-    """Place a colorbar inside a matplotlib axes.
+def cbar_in_axes(fig: mpl.figure.Figure,
+                 ax: mpl.axes.Axes,
+                 pos: Optional[str] = None,
+                 shape: Optional[Tuple[float, float]] = None,
+                 cax: Optional[mpl.axes.Axes] = None) -> Tuple[mpl.axes.Axes, float, Dict[str, bool]]:
+    """
+    Places a colorbar as an inset inside a Matplotlib axes.
 
     Parameters
     ----------
@@ -221,26 +258,27 @@ def cbar_in_axes(
         The axes object to place the colorbar in.
     pos : str, optional
         Position of the colorbar. One of 'lower left', 'lower right',
-        'upper left', or 'upper right'. Default is 'lower right'.
-    cbar_size : float, optional
-        Size of the colorbar. Default is 0.1.
-    cbar_aspect : float, optional
-        Aspect ratio of the colorbar. Default is 0.2.
+        'upper left', or 'upper right'. Defaults to 'lower right'.
+    shape : tuple of (float, float), optional
+        The (width, height) of the colorbar as a fraction of the parent axes'
+        dimensions. Defaults to (0.04, 0.12).
     cax : mpl.axes.Axes, optional
-        An existing axes for the colorbar. If None, a new one is created.
+        An existing axes to use for the colorbar. If None, a new one is created.
 
     Returns
     -------
-    Tuple[mpl.axes.Axes, float, Dict[str, bool]]
+    tuple
         A tuple containing:
-        - The colorbar axes.
-        - The y-adjustment position.
+        - The colorbar axes object.
+        - The y-adjustment position for ticks.
         - A dictionary of tick parameters.
 
     Raises
     ------
     ValueError
         If `pos` is invalid.
+    TypeError
+        If `cax` is not a valid Axes object.
     """
 
     shape = (0.04, 0.12) if shape is None else np.array(shape)
@@ -267,15 +305,23 @@ def cbar_in_axes(
     return cax, yadjust_pos, tick_params
 
 
-def adj_light(color, amount=0.5):
+def adj_light(color: Union[str, Tuple[float, ...]], amount: float = 0.5) -> Tuple[float, float, float]:
     """
-    Lightens the given color by multiplying (1-luminosity) by the given amount.
-    Input can be matplotlib color string, hex string, or RGB tuple.
+    Lightens a given color.
 
-    Examples:
-    >> lighten_color('g', 0.3)
-    >> lighten_color('#F034A3', 0.6)
-    >> lighten_color((.3,.55,.1), 0.5)
+    The function adjusts the luminosity of the color in HLS space.
+
+    Parameters
+    ----------
+    color : str or tuple
+        The input color. Can be a Matplotlib color string, hex string, or RGB tuple.
+    amount : float, optional
+        The amount to lighten the color. 0.0 gives the original color, 1.0 gives white.
+
+    Returns
+    -------
+    tuple
+        The lightened color as an RGB tuple.
     """
     
     try:
@@ -286,46 +332,66 @@ def adj_light(color, amount=0.5):
     return colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])
 
 
-def get_contrast_color(hex, lum_thresh=186):
-
+def get_contrast_color(hex_color: str, lum_thresh: int = 186) -> str:
     """
-    Calculate a contrast color for a given hexadecimal color.
+    Calculates a high-contrast color (black or white) for a given hex color.
 
-    This function calculates the luminance of the input color and returns either white or black,
-    depending on whether or not the luminance is greater than or less the defined threhsold.
+    This is useful for determining a legible text color to overlay on a
+    colored background.
 
     Parameters
     ----------
-    hex : str
-        The hexadecimal color string (e.g., "#FFFFFF" for white).
+    hex_color : str
+        The background color as a hexadecimal string (e.g., '#FFFFFF').
     lum_thresh : int, optional
-        The luminance threshold for determining the contrast color. Default is 186.
+        The luminance threshold (0-255) for switching between black and white text.
 
     Returns
     -------
     str
-        The contrasting color as a hexadecimal string. Returns "#000000" for black if the luminance 
-        of the input color is greater than the threshold, and "#FFFFFF" for white otherwise.
+        '#000000' (black) or '#FFFFFF' (white).
     """
-    r, g, b = np.array(mpl.colors.hex2color(hex))*255
+    r, g, b = np.array(mpl.colors.hex2color(hex_color))*255
     rgbsum = (r*0.299 + g*0.587 + b*0.114)
     return '#000000' if rgbsum > lum_thresh else '#FFFFFF'
 
 
-def natural_sort_key(text):
-    """Convert a string to a list of mixed strings and integers for natural sorting"""
+def natural_sort_key(text: str) -> List[Union[str, int]]:
+    """
+    Creates a key for natural sorting (e.g., 'item1', 'item2', 'item10').
+
+    Parameters
+    ----------
+    text : str
+        The string to be converted into a sortable key.
+
+    Returns
+    -------
+    list
+        A list of mixed strings and integers for sorting.
+    """
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(text))]
 
 
-def create_gif_from_pngs(png_dir, output_gif, duration=200, loop=0):
+def create_gif_from_pngs(png_dir: Union[str, Path],
+                         output_gif: Union[str, Path],
+                         duration: int = 200,
+                         loop: int = 0) -> None:
     """
-    Create GIF from PNG files in a directory.
-    
-    Parameters:
-    - png_dir: Path to directory containing PNG files
-    - output_gif: Output GIF file path
-    - duration: Duration between frames in milliseconds
-    - loop: Number of loops (0 = infinite)
+    Creates an animated GIF from a directory of PNG files.
+
+    The PNG files are sorted naturally before being combined into the GIF.
+
+    Parameters
+    ----------
+    png_dir : str or Path
+        The directory containing the PNG files.
+    output_gif : str or Path
+        The path for the output GIF file.
+    duration : int, optional
+        The duration (in milliseconds) for each frame.
+    loop : int, optional
+        The number of times the GIF should loop (0 means infinite).
     """
     png_files = sorted(Path(png_dir).glob('*.png'), key=natural_sort_key)
     images = [Image.open(f) for f in png_files]

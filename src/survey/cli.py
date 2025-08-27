@@ -1,15 +1,28 @@
-# src/survey/cli.py
+# Built-ins
 import argparse
 import logging
 import sys
-import textwrap as tw
+from typing import NoReturn
 
+# Standard libs
 import matplotlib as mpl
 
+# Survey libs
 from survey.spatial import segment as spatial_segment
 
-def segment_command(args):
-    """Sub-command logic for segmentation."""
+def segment_command(args: argparse.Namespace) -> None:
+    """
+    Executes the segmentation sub-command logic.
+
+    This function is called when the 'segment' command is used. It sets up the
+    Matplotlib backend, parses arguments, and calls the main segmentation
+    workflow from `survey.spatial.segment`.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        An object containing the parsed command-line arguments.
+    """
 
     if args.backend:
         try:
@@ -39,7 +52,14 @@ def segment_command(args):
         sys.exit(1)
 
 
-def main():
+def main() -> NoReturn:
+    """
+    The main entry point for the command-line interface.
+
+    This function sets up logging, defines the argument parser and its
+    sub-commands, parses the command-line arguments, and dispatches to the
+    appropriate sub-command function.
+    """
     # --- Configure logging for the command-line interface ---
     # This setup directs log messages from the library to the console.
     logging.basicConfig(
