@@ -10,7 +10,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest # Use the latest Ubuntu Linux runner
+    runs-on: linux # Use the latest Ubuntu Linux runner
 
     strategy:
       matrix:
