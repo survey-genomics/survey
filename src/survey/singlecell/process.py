@@ -14,7 +14,7 @@ import mudata as md
 
 # Survey libs
 from survey.singlecell.scutils import clr_normalize
-from survey.genplot import loglog_hist
+from survey.genplot import loglog_hist, subplots
 
 
 def make_filter_genes_plots(adata: sc.AnnData,
@@ -354,23 +354,24 @@ def dim_reduction(adata: sc.AnnData,
 
 
 def add_pmito(data: Union[sc.AnnData, md.MuData],
-              org: str = 'mouse',
+              sw: str = 'mt-',
               plot: bool = True,
               name: str = '%mito') -> None:
     '''
     Calculate and add the percentage of mitochondrial counts to `.obs`.
 
-    This function identifies mitochondrial genes based on a common prefix
-    ('mt-' for mouse, 'MT-' for human) and calculates the percentage of
-    total counts per cell that map to these genes.
+    This function identifies mitochondrial genes based on a given prefix and
+    calculates the percentage of total counts per cell that map to these genes.
 
     Parameters
     ----------
     data : sc.AnnData or md.MuData
         The data object. If a MuData object is provided, the calculation is
         performed on the 'rna' modality.
-    org : {'mouse', 'human'}, optional
-        Organism, used to determine the mitochondrial gene prefix.
+    sw : str, optional
+        The prefix (startswith) to identify mitochondrial genes in `adata.var_names`.
+        It is up to the user to provide the correct prefix, which may include a
+        genome reference tag (e.g., 'GRCm38_mt-'). Defaults to 'mt-'.
     plot : bool, optional
         If True, display a histogram of the mitochondrial percentages.
     name : str, optional
@@ -384,8 +385,7 @@ def add_pmito(data: Union[sc.AnnData, md.MuData],
     Raises
     ------
     ValueError
-        If an unsupported `org` is provided, or if `data` is a MuData object
-        without an 'rna' modality.
+        If `data` is a MuData object without an 'rna' modality.
     '''
 
     if isinstance(data, sc.AnnData):
@@ -395,13 +395,6 @@ def add_pmito(data: Union[sc.AnnData, md.MuData],
             raise ValueError("If mudata is passed, `rna` mod must be present.")
         adata = data['rna']
         
-    if org == 'mouse':
-        sw = 'mt-'
-    elif org == 'human':
-        sw = 'MT-'
-    else:
-        raise ValueError("Only mouse and human genomes supported.")
-    
     genelist = adata.var_names.tolist()
     mito_genes_names = [gn for gn in genelist if gn.startswith(sw)]
     mito_genes = [genelist.index(gn) for gn in mito_genes_names]
@@ -409,11 +402,11 @@ def add_pmito(data: Union[sc.AnnData, md.MuData],
     adata.obs[name] = np.ravel(np.sum(adata[:, mito_genes].X, axis=1)) / np.ravel(np.sum(adata.X, axis=1))
 
     if plot:
-        plt.figure(figsize=(5,3))
-        plt.hist(adata.obs[name].values,bins=200,density=True)
-        plt.xlabel('Percent mitochondrial')
-        plt.ylabel('Density')
-        plt.show()
+        fig, ax = subplots(1, ar=2, fss=3)
+        ax.hist(adata.obs[name].values,bins=200,density=True)
+        ax.set_xlabel('Percent mitochondrial')
+        ax.set_ylabel('Density')
+        return ax
 
     return
 
