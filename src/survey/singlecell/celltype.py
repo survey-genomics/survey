@@ -703,23 +703,31 @@ def spec_expr(adata: sc.AnnData,
         vcounts = adata.obs[key].value_counts()
         vcounts_str = vcounts.copy()
         vcounts_str.index = vcounts_str.index.values.astype(str)
-        p_expr_dict = {key: {'groups': vcounts_str.index.values, 'vals': vcounts_str.values}}
+        # This dictionary holds the actual info to be stored/validated
+        p_expr_info = {'groups': vcounts_str.index.values, 'vals': vcounts_str.values}
 
         if mode == 'validate':
-            if key not in adata.uns['p_expr'] or len(adata.uns['p_expr'][key]['groups']) != len(p_expr_dict[key]['groups']):
+            # Check if the key exists and has the correct structure.
+            if key not in adata.uns['p_expr'] or 'groups' not in adata.uns['p_expr'][key]:
+                print('Changes detected in p_expr (or first run for this key).')
+                return True, vcounts
+
+            stored_info = adata.uns['p_expr'][key]
+            if len(stored_info['groups']) != len(p_expr_info['groups']):
                 print('Changes detected in p_expr.')
                 return True, vcounts
-            groups_same = (adata.uns['p_expr'][key]['groups'] == p_expr_dict[key]['groups']).all()
-            vals_same = (adata.uns['p_expr'][key]['vals'] == p_expr_dict[key]['vals']).all()
+            
+            groups_same = (stored_info['groups'] == p_expr_info['groups']).all()
+            vals_same = (stored_info['vals'] == p_expr_info['vals']).all()
+
             if groups_same and vals_same:
                 return False, vcounts
             else:
                 print('Changes detected in p_expr.')
                 return True, vcounts
         elif mode == 'update':
-            if key not in adata.uns['p_expr']:
-                adata.uns['p_expr'][key] = {}
-            adata.uns['p_expr'][key].update(p_expr_dict)
+            # Store the info directly under the key
+            adata.uns['p_expr'][key] = p_expr_info
             return
         else:
             raise ValueError("Mode must be 'validate' or 'update'.")
@@ -741,6 +749,10 @@ def spec_expr(adata: sc.AnnData,
         numerator_groups = groups[0]
         denominator_groups = [g for g in possible_groups if g not in numerator_groups]
         groups[1] = denominator_groups
+
+    # Validate groups
+    if not all([is_listlike(g) for g in groups]):
+        raise ValueError("All groups must be list-like.")
 
     # Flatten groups and ensure all provided groups are valid
     groups_flat = [i for j in groups for i in j]
