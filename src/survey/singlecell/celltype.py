@@ -646,14 +646,13 @@ def spec_expr(adata: sc.AnnData,
               p: float,
               key: str = 'leiden',
               layer: str = 'npc-l1p',
-              p_of: Optional[Union[str, List[str]]] = None) -> pd.Series:
+              p_of: Optional[Union[str, List[str]]] = None,
+              ratio: str = 'percent') -> pd.Series:
     """
-    Compute a specific expression score based on the ratio of mean expression
-    in expressing cells between two groups.
+    Compute a specific expression score based on a ratio between two groups.
 
-    This score is the ratio of the mean expression of a gene in expressing cells
-    (>0 counts) of a target group to the mean expression in expressing cells of
-    a reference group.
+    This score can be the ratio of the mean expression in expressing cells
+    or the ratio of the percentage of expressing cells.
 
     Parameters
     ----------
@@ -684,16 +683,30 @@ def spec_expr(adata: sc.AnnData,
             - `list-like`: A subset of groups from `groups[0]`. Genes must be
               expressed in > `p` percent of cells when the specified subgroups
               are combined and treated as one.
+    ratio : {'mean', 'percent'}, optional
+        The type of ratio to compute. Defaults to 'mean'.
+        - 'mean': Ratio of the mean expression in positive cells (>0 counts).
+        - 'percent': Ratio of the percentage of expressing cells.
 
     Returns
     -------
     pd.Series
-        A Series of specific mean expression scores (numerator/denominator), sorted.
+        A Series of specific expression scores (numerator/denominator), sorted.
 
     Raises
     ------
     ValueError
-        If invalid groups are provided or if `p_of` is invalid.
+        If invalid groups, `p_of`, or `ratio` are provided.
+
+    Notes
+    -----
+    In general: 
+         - to find genes with broader expression across all groups but 
+         slightly elevated expression in groups[0], use `ratio='mean'` and 
+         higher p (e.g. 0.5).
+         - to find genes with low but highly-specific expression in groups[0], 
+         use `ratio='percent'` and lower p (e.g. 0.2).
+
     """
     # This function is a slightly modified copy of the original `spec_expr`
     # It is used to check if pre-computed percentage data needs updating.
@@ -741,6 +754,9 @@ def spec_expr(adata: sc.AnnData,
         possible_groups = vcounts.index.tolist()
         return groups, vcounts, possible_groups
 
+    if ratio not in ['mean', 'percent']:
+        raise ValueError("`ratio` must be either 'mean' or 'percent'.")
+
     groups, vcounts, possible_groups = check_groups(adata, groups, key)
 
     # Handle the special 'rest' case for the denominator group.
@@ -749,10 +765,6 @@ def spec_expr(adata: sc.AnnData,
         numerator_groups = groups[0]
         denominator_groups = [g for g in possible_groups if g not in numerator_groups]
         groups[1] = denominator_groups
-
-    # Validate groups
-    if not all([is_listlike(g) for g in groups]):
-        raise ValueError("All groups must be list-like.")
 
     # Flatten groups and ensure all provided groups are valid
     groups_flat = [i for j in groups for i in j]
@@ -801,23 +813,18 @@ def spec_expr(adata: sc.AnnData,
     target_groups = groups[0]
 
     if len(target_groups) == 1:
-        # Case 1: Only one group in the numerator. Filter is based on this single group.
         passing_genes_mask = (p_expr_df.loc[target_groups[0]] > p).values
     else:
-        # Case 2: Multiple groups in the numerator. Logic depends on `p_of`.
         if p_of is None:
-            # 2a: Calculate combined percentage across ALL subgroups in groups[0]
             print(f"Filtering based on combined expression percentage across: {target_groups}")
             combined_mask = adata.obs[key].isin(target_groups).values
             X_subset = X[combined_mask]
             p_expr_combined = X_subset.getnnz(axis=0) / X_subset.shape[0]
             passing_genes_mask = p_expr_combined > p
         elif p_of == 'any':
-            # 2b: Gene passes if ANY subgroup in groups[0] meets the threshold
             print(f"Filtering based on ANY subgroup passing threshold in: {target_groups}")
             passing_genes_mask = (p_expr_df.loc[target_groups] > p).any(axis=0).values
-        elif is_listlike(p_of):
-            # 2c: `p_of` is a specific list of subgroups within groups[0]
+        elif is_list_like(p_of):
             if not np.all(np.isin(p_of, target_groups)):
                 raise ValueError(f'If `p_of` is a list, it must be a subset of the numerator groups: {target_groups}')
             print(f"Filtering based on combined expression percentage across specified subgroups: {p_of}")
@@ -833,34 +840,39 @@ def spec_expr(adata: sc.AnnData,
         print("Warning: No genes passed the filtering criteria.")
         return pd.Series(dtype=np.float64)
 
-    # === Step 2: Calculate Mean Expression of Positive Cells ===
-    print('Computing mean expression of positive cells...')
-    mean_expr_list = []
-    for g in possible_groups:
-        gbool = (adata.obs[key] == g).values
-        gX = X[gbool].tocsc()
-        sums = np.array(gX.sum(axis=0)).flatten()
-        nnz = gX.getnnz(axis=0)
-        means = np.divide(sums, nnz, out=np.zeros_like(sums, dtype=float), where=nnz!=0)
-        mean_expr_list.append(means)
+    # === Step 2: Prepare DataFrame for Ratio Calculation ===
+    sub_df = None
+    if ratio == 'mean':
+        print('Computing mean expression of positive cells...')
+        mean_expr_list = []
+        for g in possible_groups:
+            gbool = (adata.obs[key] == g).values
+            gX = X[gbool].tocsc()
+            sums = np.array(gX.sum(axis=0)).flatten()
+            nnz = gX.getnnz(axis=0)
+            means = np.divide(sums, nnz, out=np.zeros_like(sums, dtype=float), where=nnz!=0)
+            mean_expr_list.append(means)
+        
+        mean_expr_df = pd.DataFrame(np.vstack(mean_expr_list), index=possible_groups, columns=adata.var_names)
+        sub_df = mean_expr_df[passing_genes]
 
-    mean_expr_df = pd.DataFrame(np.vstack(mean_expr_list), index=possible_groups, columns=adata.var_names).T
-    sub_mean_df = mean_expr_df.loc[passing_genes].T
+    elif ratio == 'percent':
+        print('Using percentage of expressing cells for ratio...')
+        sub_df = p_expr_df[passing_genes]
 
     # === Step 3: Compute the Ratio ===
     div = dict(zip(['num', 'den'], [0, 0]))
     for group, val in zip(groups, ['num', 'den']):
         if len(group) == 1:
-            div[val] = sub_mean_df.loc[group[0]]
+            div[val] = sub_df.loc[group[0]]
         else:
             weights = vcounts.loc[group].values
-            div[val] = sub_mean_df.loc[group].apply(lambda x: np.average(x, weights=weights), axis=0)
+            div[val] = sub_df.loc[group].apply(lambda x: np.average(x, weights=weights), axis=0)
     
     epsilon = 1e-9
     result = div['num'] / (div['den'] + epsilon)
 
     return result.sort_values(ascending=False)
-
 
 
 class Annotate:
