@@ -21,29 +21,44 @@ Survey has been tested using Python 3.10 on MacOS and Ubuntu Linux.
 
 2. Clone this repository and create a conda environment from the `environment.yml` file:
 
-    ```
+    ```zsh
     cd survey/
-    mamba env create -f environment.yml
+    mamba env create -f environment_macos.yml
     mamba activate survey-env
     ```
 
 3. Then, install the package using pip:
 
-    ```
+    ```zsh
     (survey-env) pip install .
     ```
 
 ## Environment File
 
-The environment file has been configured for analysis in Jupyter Lab, tested within VS Code (Version: 1.103.1, Universal) using the extensions for Jupyter (version 2025.7.0) and Jupyter Powertoys (version 0.1.1). To recreate it, the following installations (beyond the dependencies listed in `pyproject.toml`) were performed, in order (all within survey-env):
+The environment files have been configured for analysis in Jupyter Lab, tested within VS Code (Version: 1.103.1, Universal) using the extensions for Jupyter (version 2025.7.0) and Jupyter Powertoys (version 0.1.1). If they cannot be solved on your machine, you should be able to recreate them with the following:
 
+```zsh
+mamba create -n survey-env python=3.10.18
+mamba activate survey-env
+git clone <this_repo>
+cd survey
+pip install .
+mamba install bioconda::harmonypy==0.0.10
+mamba install -c conda-forge python-igraph==0.11.5
+mamba install ipykernel=6.29.5
+mamba install -c conda-forge ipywidgets==8.1.7
+mamba install tqdm==4.67.1
+mamba install -c conda-forge ipympl==0.9.7
 ```
-mamba install bioconda::harmonypy==0.0.10 # harmony integration/batch correction
-mamba install -c conda-forge python-igraph==0.11.5 # clustering
-mamba install ipykernel=6.29.5 # Jupyter Lab
-mamba install -c conda-forge ipywidgets # for tqdm and other notebook-rendered tools
-mamba install tqdm # loading bar for long processes
-mamba install -c conda-forge ipympl # in-notebook segmentation using mpl interactive
+
+Explanations of the packages installed:
+```txt
+bioconda::harmonypy==0.0.10 # harmony integration/batch correction
+python-igraph==0.11.5 # clustering
+ipykernel=6.29.5 # Jupyter Lab
+ipywidgets==8.1.7 # for tqdm and other notebook-rendered tools
+tqdm==4.67.1 # loading bar for long processes
+ipympl==0.9.7 # in-notebook segmentation using mpl interactive
 ```
 
 To use the environment as a python kernel for Jupyter Lab:
@@ -51,7 +66,6 @@ To use the environment as a python kernel for Jupyter Lab:
 ```
 python -m ipykernel install --user --name survey-env --display-name "survey-env"
 ```
-
 
 ## Support
 
