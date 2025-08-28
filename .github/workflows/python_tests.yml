@@ -3,36 +3,51 @@ name: Python CI/CD
 on:
   push:
     branches:
-      - main # Run on pushes to the main branch
+      - main
+    # Add this 'paths' filter to control when the push workflow runs
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'environment.yml'
+      - '.github/workflows/**' # Also good to run if you change the workflow itself
+
   pull_request:
     branches:
-      - main # Run on pull requests targeting the main branch
+      - main
+    # Also add the 'paths' filter here for pull requests
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'environment.yml'
+      - '.github/workflows/**'
 
 jobs:
   build:
-    runs-on: linux # Use the latest Ubuntu Linux runner
+    runs-on: ubuntu-latest # It's good practice to use 'ubuntu-latest'
 
     strategy:
       matrix:
-        python-version: ["3.10.0", "3.11.0"] # Test across multiple Python versions
-        # You might add "3.12" if your code is compatible
+        # Use minor versions to always test against the latest patch release
+        python-version: ["3.10", "3.11"]
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4 # Action to clone your repository
+      uses: actions/checkout@v4
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5 # Action to set up Python
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'pip' # Cache pip dependencies for faster builds
+        cache: 'pip'
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip # Upgrade pip
-        # Install your project in editable mode with test dependencies
+        python -m pip install --upgrade pip
+        # Install with test dependencies
         pip install -e ".[test]"
 
     - name: Run pytest
       run: |
-        pytest -v # Run your tests with verbose output
+        pytest -v
