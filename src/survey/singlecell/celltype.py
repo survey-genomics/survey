@@ -824,7 +824,7 @@ def spec_expr(adata: sc.AnnData,
         elif p_of == 'any':
             print(f"Filtering based on ANY subgroup passing threshold in: {target_groups}")
             passing_genes_mask = (p_expr_df.loc[target_groups] > p).any(axis=0).values
-        elif is_list_like(p_of):
+        elif is_listlike(p_of):
             if not np.all(np.isin(p_of, target_groups)):
                 raise ValueError(f'If `p_of` is a list, it must be a subset of the numerator groups: {target_groups}')
             print(f"Filtering based on combined expression percentage across specified subgroups: {p_of}")
@@ -1410,7 +1410,12 @@ class Annotate:
             return None
 
     @staticmethod
-    def annotation(adata: sc.AnnData, path_to_annots: str, key: str = 'leiden', overwrite: bool = False, export: bool = False):
+    def annotation(adata: sc.AnnData, 
+                   path_to_annots: str, 
+                   key: str = 'leiden', 
+                   overwrite: bool = False, 
+                   export: bool = False, 
+                   check_genes=False):
         """
         Annotate clusters or export annotations using a TSV file.
 
@@ -1429,6 +1434,8 @@ class Annotate:
             If True, allows overwriting existing files or `adata.uns` entries.
         export : bool
             If True, exports annotations; if False (default), imports them.
+        check_genes : bool
+            If True, checks if all marker genes are present in `adata.var_names`.
         """
         if export:
             # --- Export Logic ---
@@ -1481,11 +1488,12 @@ class Annotate:
             details = df['Details'].fillna('').to_dict()
 
             # Validate marker genes
-            unique_genes = {gene for gene_list in markers.values() for gene in gene_list}
-            missing_genes = unique_genes - set(adata.var_names)
-            missing_genes.discard('')  # Remove empty strings if any
-            if missing_genes:
-                raise ValueError(f"Genes not in `adata.var_names`: {', '.join(list(missing_genes)[:5])}...")
+            if check_genes:
+                unique_genes = {gene for gene_list in markers.values() for gene in gene_list}
+                missing_genes = unique_genes - set(adata.var_names)
+                missing_genes.discard('')  # Remove empty strings if any
+                if missing_genes:
+                    raise ValueError(f"Genes not in `adata.var_names`: {', '.join(list(missing_genes)[:5])}...")
             
             # Store in adata.uns
             adata.uns['annot'][key] = {
