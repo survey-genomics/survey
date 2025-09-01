@@ -646,29 +646,47 @@ def spec_expr(adata: sc.AnnData,
               p: float,
               key: str = 'leiden',
               layer: str = 'npc-l1p',
-              p_of: Optional[Union[str, List[str]]] = None) -> pd.Series:
+              p_of: Optional[Union[str, List[str]]] = None,
+              ratio: str = 'percent') -> pd.Series:
     """
-    Compute a "specific expression" score based on percentage of expressing cells.
+    Compute a specific expression score based on a ratio between two groups.
 
-    This score is the ratio of the percentage of cells expressing a gene in a
-    target group to the percentage in a reference group.
+    This score can be the ratio of the mean expression in expressing cells
+    or the ratio of the percentage of expressing cells.
 
     Parameters
     ----------
     adata : sc.AnnData
         The annotated data matrix.
     groups : str or list of lists
-        The groups to compare. E.g., `['CD4 T-cells']` or `[['CD4', 'CD8'], ['B-cells']]`.
+        The groups to compare. E.g., `[['CD4 T-cells'], ['CD8 T-cells']]`.
+        The first list is the numerator, the second is the denominator.
+        The denominator can be 'rest' or ['rest'] to compare against all
+        other groups.
     p : float
         The minimum percentage of expressing cells (0 to 1) required in the
-        `p_of` group(s) for a gene to be considered.
+        `p_of` group(s) for a gene to be considered in the analysis.
     key : str, optional
-        The key in `adata.obs` that specifies the groupings.
+        The key in `adata.obs` that specifies the cell groupings. Defaults to 'leiden'.
     layer : str, optional
-        The data layer to use for expression values.
+        The data layer to use for expression values. Defaults to 'npc-l1p'.
     p_of : str or list of str, optional
-        The group(s) to which the percentage threshold `p` is applied.
-        If None, uses the first group in `groups`. If 'any', any group can pass.
+        Logic for applying the percentage threshold `p`, which is always based on
+        the numerator group(s) (`groups[0]`).
+        - If `groups[0]` contains a single group, this is ignored and the filter
+          is based on that single group.
+        - If `groups[0]` has multiple subgroups:
+            - `None` (default): Genes must be expressed in > `p` percent of cells
+              when all subgroups in `groups[0]` are combined and treated as one.
+            - `'any'`: Genes must be expressed in > `p` percent of cells in at
+              least ONE of the subgroups in `groups[0]`.
+            - `list-like`: A subset of groups from `groups[0]`. Genes must be
+              expressed in > `p` percent of cells when the specified subgroups
+              are combined and treated as one.
+    ratio : {'mean', 'percent'}, optional
+        The type of ratio to compute. Defaults to 'mean'.
+        - 'mean': Ratio of the mean expression in positive cells (>0 counts).
+        - 'percent': Ratio of the percentage of expressing cells.
 
     Returns
     -------
@@ -678,80 +696,84 @@ def spec_expr(adata: sc.AnnData,
     Raises
     ------
     ValueError
-        If invalid groups are provided or if `p_of` is invalid.
+        If invalid groups, `p_of`, or `ratio` are provided.
+
+    Notes
+    -----
+    In general: 
+         - to find genes with broader expression across all groups but 
+         slightly elevated expression in groups[0], use `ratio='mean'` and 
+         higher p (e.g. 0.5).
+         - to find genes with low but highly-specific expression in groups[0], 
+         use `ratio='percent'` and lower p (e.g. 0.2).
+
     """
-
-    def check_p_expr(adata: sc.AnnData, 
-                     key: str, 
+    # This function is a slightly modified copy of the original `spec_expr`
+    # It is used to check if pre-computed percentage data needs updating.
+    def check_p_expr(adata: sc.AnnData,
+                     key: str,
                      mode: str) -> Union[Tuple[bool, pd.Series], None]:
-        """
-        Helper to validate or update pre-computed percentage expression data.
-        
-        Parameters
-        ----------
-        adata : sc.AnnData
-            The annotated data matrix.
-        key : str
-            The key for groupings in `adata.obs`.
-        mode : {'validate', 'update'}
-            - 'validate': Checks if stored group counts match current data.
-            - 'update': Stores the current group counts.
-
-        Returns
-        -------
-        (bool, pd.Series) or None
-            If `mode='validate'`, returns (needs_update, value_counts).
-            If `mode='update'`, returns None.
-        """
-        # Get value counts of the groupings
         vcounts = adata.obs[key].value_counts()
         vcounts_str = vcounts.copy()
         vcounts_str.index = vcounts_str.index.values.astype(str)
-        p_expr_dict = {key: {'groups': vcounts_str.index.values, 'vals': vcounts_str.values}}
+        # This dictionary holds the actual info to be stored/validated
+        p_expr_info = {'groups': vcounts_str.index.values, 'vals': vcounts_str.values}
 
         if mode == 'validate':
+            # Check if the key exists and has the correct structure.
+            if key not in adata.uns['p_expr'] or 'groups' not in adata.uns['p_expr'][key]:
+                print('Changes detected in p_expr (or first run for this key).')
+                return True, vcounts
 
-            # Validate whether the groupings and their values have changed
-            if len(adata.uns['p_expr'][key]['groups']) != len(p_expr_dict[key]['groups']):
+            stored_info = adata.uns['p_expr'][key]
+            if len(stored_info['groups']) != len(p_expr_info['groups']):
                 print('Changes detected in p_expr.')
                 return True, vcounts
             
-            groups_same = (adata.uns['p_expr'][key]['groups'] == p_expr_dict[key]['groups']).all()
-            vals_same = (adata.uns['p_expr'][key]['vals'] == p_expr_dict[key]['vals']).all()
+            groups_same = (stored_info['groups'] == p_expr_info['groups']).all()
+            vals_same = (stored_info['vals'] == p_expr_info['vals']).all()
 
             if groups_same and vals_same:
-                return False, vcounts  # No change, no need to update
+                return False, vcounts
             else:
                 print('Changes detected in p_expr.')
-                return True, vcounts  # Change detected, need to update
-            
+                return True, vcounts
         elif mode == 'update':
-            # Update the p_expr in adata.uns
-            adata.uns['p_expr'].update(p_expr_dict)
+            # Store the info directly under the key
+            adata.uns['p_expr'][key] = p_expr_info
             return
         else:
-            raise ValueError("Mode not understood. Must be 'validate' or 'update'.")
+            raise ValueError("Mode must be 'validate' or 'update'.")
+
+    # This is a simplified version of scanpy's internal _check_groups
+    def check_groups(adata: sc.AnnData, groups: Union[str, List[List[str]]], key: str):
+        if not isinstance(groups, list) or (len(groups) > 0 and not isinstance(groups[0], list)):
+             groups = [[groups], [g for g in adata.obs[key].cat.categories if g != groups] ]
+        
+        vcounts = adata.obs[key].value_counts()
+        possible_groups = vcounts.index.tolist()
+        return groups, vcounts, possible_groups
+
+    if ratio not in ['mean', 'percent']:
+        raise ValueError("`ratio` must be either 'mean' or 'percent'.")
 
     groups, vcounts, possible_groups = check_groups(adata, groups, key)
 
+    # Handle the special 'rest' case for the denominator group.
+    if len(groups) == 2 and (groups[1] == ['rest'] or groups[1] == 'rest'):
+        print("Denominator group 'rest' detected. Using all groups not in the numerator.")
+        numerator_groups = groups[0]
+        denominator_groups = [g for g in possible_groups if g not in numerator_groups]
+        groups[1] = denominator_groups
+
     # Flatten groups and ensure all provided groups are valid
     groups_flat = [i for j in groups for i in j]
-    groups_in_possible = [i in possible_groups for i in groups_flat]
-    if not all(groups_in_possible):
-        raise ValueError(f'Provided group "{groups_flat[groups_in_possible.index(False)]}" not in {key}')
+    if not all(i in possible_groups for i in groups_flat):
+        invalid_group = next(i for i in groups_flat if i not in possible_groups)
+        raise ValueError(f'Provided group "{invalid_group}" not in adata.obs["{key}"].')
 
-    # Define `p_of` if not provided
-    if p_of is None:
-        p_of = groups[0]
-    elif p_of == 'any':
-        pass
-    else:
-        if not is_listlike(p_of):
-            raise TypeError('Param `p_of` must be list-like.')
-        if not np.intersect1d(p_of, possible_groups).shape[0] == len(p_of):
-            raise ValueError(f'Param `p_of` must be subset of the groups in {key}.')    
-
-    # Check if 'p_expr' already exists, and if not, compute it
+    # === Step 1: Calculate Percentage Expression for Gene Filtering ===
+    add_p_expr = False
     if 'p_expr' not in adata.uns:
         adata.uns['p_expr'] = dict()
         add_p_expr = True
@@ -761,37 +783,84 @@ def spec_expr(adata: sc.AnnData,
     else:
         if f'P_expr_{key}' not in adata.varm:
             raise ValueError(
-                'Data for p_expr found in adata.uns but not in adata.varm. ' \
+                'Data for p_expr found in adata.uns but not in adata.varm. '
                 'Please remove p_expr from adata.uns and re-run.')
         add_p_expr, vcounts = check_p_expr(adata, key, mode='validate')
 
-    if add_p_expr:
-        print('Computing percentages...')
-        X = adata.layers[layer]
-        if not isinstance(X, csr_matrix):
-            X = csr_matrix(X)  # Convert to sparse matrix if needed
+    X = adata.layers[layer]
+    if not isinstance(X, csr_matrix):
+        X = csr_matrix(X)
 
-        # Compute percentage expression for each group
-        p_expr = []
+    if add_p_expr:
+        print('Computing percentages for gene filtering...')
+        p_expr_list = []
         for g in possible_groups:
             gbool = (adata.obs[key] == g).values
             gX = X[gbool].tocsc()
-            arr = gX.getnnz(axis=0) / gX.shape[0]
-            p_expr.append(arr)
-
-        adata.varm[f'P_expr_{key}'] = np.vstack(p_expr).T
+            # Handle case where a group might be empty
+            if gX.shape[0] == 0:
+                arr = np.zeros(gX.shape[1])
+            else:
+                arr = gX.getnnz(axis=0) / gX.shape[0]
+            p_expr_list.append(arr)
+        adata.varm[f'P_expr_{key}'] = np.vstack(p_expr_list).T
         check_p_expr(adata, key, mode='update')
 
-    # Create a DataFrame of percentage expression data
-    df = pd.DataFrame(adata.varm[f'P_expr_{key}'], index=adata.var_names, columns=possible_groups).T
+    p_expr_df = pd.DataFrame(adata.varm[f'P_expr_{key}'], index=adata.var_names, columns=possible_groups).T
 
-    # Filter genes based on the `p` threshold
-    if p_of == 'any':
-        sub_df = df.iloc[:, df.apply(lambda x: np.any(x > p), axis=0, raw=True).values]
+    # === Step 1b: Filter Genes Based on Expression Percentage (New Logic) ===
+    passing_genes_mask = None
+    target_groups = groups[0]
+
+    if len(target_groups) == 1:
+        passing_genes_mask = (p_expr_df.loc[target_groups[0]] > p).values
     else:
-        sub_df = df.iloc[:, pd.concat([df.loc[g] > p for g in p_of], axis=1).all(1).values]
+        if p_of is None:
+            print(f"Filtering based on combined expression percentage across: {target_groups}")
+            combined_mask = adata.obs[key].isin(target_groups).values
+            X_subset = X[combined_mask]
+            p_expr_combined = X_subset.getnnz(axis=0) / X_subset.shape[0]
+            passing_genes_mask = p_expr_combined > p
+        elif p_of == 'any':
+            print(f"Filtering based on ANY subgroup passing threshold in: {target_groups}")
+            passing_genes_mask = (p_expr_df.loc[target_groups] > p).any(axis=0).values
+        elif is_listlike(p_of):
+            if not np.all(np.isin(p_of, target_groups)):
+                raise ValueError(f'If `p_of` is a list, it must be a subset of the numerator groups: {target_groups}')
+            print(f"Filtering based on combined expression percentage across specified subgroups: {p_of}")
+            combined_mask = adata.obs[key].isin(p_of).values
+            X_subset = X[combined_mask]
+            p_expr_combined = X_subset.getnnz(axis=0) / X_subset.shape[0]
+            passing_genes_mask = p_expr_combined > p
+        else:
+            raise TypeError("`p_of` must be None, 'any', or a list-like object.")
 
-    # Compute numerator and denominator for differential expression score
+    passing_genes = p_expr_df.columns[passing_genes_mask]
+    if len(passing_genes) == 0:
+        print("Warning: No genes passed the filtering criteria.")
+        return pd.Series(dtype=np.float64)
+
+    # === Step 2: Prepare DataFrame for Ratio Calculation ===
+    sub_df = None
+    if ratio == 'mean':
+        print('Computing mean expression of positive cells...')
+        mean_expr_list = []
+        for g in possible_groups:
+            gbool = (adata.obs[key] == g).values
+            gX = X[gbool].tocsc()
+            sums = np.array(gX.sum(axis=0)).flatten()
+            nnz = gX.getnnz(axis=0)
+            means = np.divide(sums, nnz, out=np.zeros_like(sums, dtype=float), where=nnz!=0)
+            mean_expr_list.append(means)
+        
+        mean_expr_df = pd.DataFrame(np.vstack(mean_expr_list), index=possible_groups, columns=adata.var_names)
+        sub_df = mean_expr_df[passing_genes]
+
+    elif ratio == 'percent':
+        print('Using percentage of expressing cells for ratio...')
+        sub_df = p_expr_df[passing_genes]
+
+    # === Step 3: Compute the Ratio ===
     div = dict(zip(['num', 'den'], [0, 0]))
     for group, val in zip(groups, ['num', 'den']):
         if len(group) == 1:
@@ -799,9 +868,11 @@ def spec_expr(adata: sc.AnnData,
         else:
             weights = vcounts.loc[group].values
             div[val] = sub_df.loc[group].apply(lambda x: np.average(x, weights=weights), axis=0)
+    
+    epsilon = 1e-9
+    result = div['num'] / (div['den'] + epsilon)
 
-    # Return sorted differential expression scores
-    return (div['num'] / div['den']).sort_values(ascending=False)
+    return result.sort_values(ascending=False)
 
 
 class Annotate:
@@ -1339,7 +1410,12 @@ class Annotate:
             return None
 
     @staticmethod
-    def annotation(adata: sc.AnnData, path_to_annots: str, key: str = 'leiden', overwrite: bool = False, export: bool = False):
+    def annotation(adata: sc.AnnData, 
+                   path_to_annots: str, 
+                   key: str = 'leiden', 
+                   overwrite: bool = False, 
+                   export: bool = False, 
+                   check_genes=False):
         """
         Annotate clusters or export annotations using a TSV file.
 
@@ -1358,6 +1434,8 @@ class Annotate:
             If True, allows overwriting existing files or `adata.uns` entries.
         export : bool
             If True, exports annotations; if False (default), imports them.
+        check_genes : bool
+            If True, checks if all marker genes are present in `adata.var_names`.
         """
         if export:
             # --- Export Logic ---
@@ -1410,11 +1488,12 @@ class Annotate:
             details = df['Details'].fillna('').to_dict()
 
             # Validate marker genes
-            unique_genes = {gene for gene_list in markers.values() for gene in gene_list}
-            missing_genes = unique_genes - set(adata.var_names)
-            missing_genes.discard('')  # Remove empty strings if any
-            if missing_genes:
-                raise ValueError(f"Genes not in `adata.var_names`: {', '.join(list(missing_genes)[:5])}...")
+            if check_genes:
+                unique_genes = {gene for gene_list in markers.values() for gene in gene_list}
+                missing_genes = unique_genes - set(adata.var_names)
+                missing_genes.discard('')  # Remove empty strings if any
+                if missing_genes:
+                    raise ValueError(f"Genes not in `adata.var_names`: {', '.join(list(missing_genes)[:5])}...")
             
             # Store in adata.uns
             adata.uns['annot'][key] = {
