@@ -251,6 +251,7 @@ def get_add_legend_pm() -> ParamManager:
 
     return pm
 
+
 def get_pm(plot_type: str) -> ParamManager:
     """
     Get the ParamManager for a specific plot decoration type.
