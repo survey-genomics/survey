@@ -510,6 +510,9 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
         if match_color is True:
             cdict_labeled = dict(zip(new_index_labeled, [cdict[i] for i in centroids.index]))
             cdict_legend = dict(zip(new_index_legend, [cdict[i] for i in centroids.index]))
+            if configs['legend']['show_all_cats'] is not None:
+                mapper = dict(zip(centroids.index, new_index_legend))
+                configs['legend']['show_all_cats'] = configs['legend']['show_all_cats'].map(mapper)
         centroids.index = new_index_labeled
 
     # Plot the centroids with labels
@@ -517,7 +520,7 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
 
     # Add legend if requested
     if legend:
-        if cdict is None:
+        if cdict_legend is None:
             raise ValueError(
                 "cdict must be provided to plot legend. "
                 "Set match_color=True to get cdict."
