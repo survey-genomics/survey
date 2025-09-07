@@ -1,6 +1,8 @@
 # Built-ins
 import os
-from typing import Union, List, Optional, Dict, Tuple
+from typing import (
+    Union, List, Optional, Dict, Tuple, Any
+)
 import warnings
 
 # Standard libs
@@ -22,7 +24,7 @@ from anytree.importer import DictImporter
 # Survey libs
 from survey.genplot import subplots
 from survey.singlecell.scutils import QuietScanpyLoad
-from survey.genutils import is_listlike
+from survey.genutils import is_listlike, get_functional_dependency
 from survey import singlecell as svc
 from survey.singlecell.meta import (
     add_colors, meta_exists, reset_meta_keys
@@ -876,538 +878,497 @@ def spec_expr(adata: sc.AnnData,
 
 
 class Annotate:
-    """
-    Manages annotation transfer, hierarchy recovery, and visualization for single-cell data.
+    """Manages annotation transfer from a reference dataframe to an AnnData object.
 
-    This class provides a streamlined workflow for applying existing cell type annotations
-    to a new clustering of the same dataset. It handles mapping, corrects for hierarchical
-    inconsistencies that may arise from more granular clustering, and offers tools for
-    visualization and final application of the new labels.
+    This class provides a semi-automated workflow to map cell type annotations
+    from a reference `pandas.DataFrame` onto the clusters of a `scanpy.AnnData`
+    object. It assumes the reference annotations follow a hierarchical structure
+    (e.g., Level 1: Immune, Level 2: T-cell, Level 3: CD4+ T-cell).
+
+    The workflow involves three main steps:
+    1.  **Initialization**: The object is created, which automatically builds the
+        annotation hierarchy, aligns the reference and target datasets by a
+        shared identifier, and calculates the mapping rates between each cluster
+        and the available annotations.
+    2.  **Inspection**: Helper methods like `show_tree()` and `print_low_map_rates()`
+        are used to understand the annotation structure and identify clusters
+        that cannot be automatically annotated with high confidence.
+    3.  **Application**: The `apply()` method is called with a confidence
+        threshold and a manual mapping for low-confidence clusters. This adds
+        the new, complete annotation columns to `adata.obs`.
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The annotated data matrix to which annotations will be added.
+    df : pd.DataFrame
+        A dataframe containing the reference annotations. It must contain the
+        `id_var` column and the columns specified in `annot_vars`.
+    annot_vars : List[str]
+        A list of column names in `df` that represent the annotation
+        hierarchy, ordered from the most general to the most granular.
+    id_var : str, optional
+        The name of the column present in both `adata.obs` and `df` used to
+        align cells between the two datasets. Defaults to the reaction id "rxn".
+    cluster_key : str, optional
+        The column name in `adata.obs` that contains the cluster labels
+        (e.g., 'leiden', 'louvain'). Defaults to 'leiden'.
+
+    Attributes
+    ----------
+    adata : sc.AnnData
+        The `AnnData` object being annotated.
+    annot_vars : List[str]
+        The list of hierarchical annotation column names.
+    hierarchy_root : anytree.Node
+        The root node of the annotation hierarchy tree built from `df`.
+    leaf_id_map : Dict[str, int]
+        A dictionary mapping the most granular annotation labels (leaves) to
+        unique integer IDs.
+    mapping : Dict[str, ClusterMap]
+        A dictionary where keys are cluster labels and values are `ClusterMap`
+        objects containing mapping statistics for that cluster.
+
+    Examples
+    --------
+    >>> # Assume `adata` is a clustered AnnData object and `ref_df` is a DataFrame
+    >>> # with annotations.
+    >>> # ref_df might look like:
+    >>> #           rxn   ct1          ct2
+    >>> # ACGT-1-0  r1    Immune       T-cell
+    >>> # TGCA-1-0  r2    Immune       B-cell
+    >>>
+    >>> # 1. Initialize the Annotate object
+    >>> annotator = Annotate(
+    ...     adata=adata,
+    ...     df=ref_df,
+    ...     annot_vars=['ct1', 'ct2'],
+    ...     id_var='rxn',
+    ...     cluster_key='leiden'
+    ... )
+    
+    >>> # 2. Inspect the hierarchy and mapping rates
+    >>> annotator.show_tree()
+    --- Detected Annotation Hierarchy ---
+    ROOT
+    └── Immune
+        ├── T-cell (ID: 0)
+        └── B-cell (ID: 1)
+    -----------------------------------
+
+    >>> # Identify clusters that need manual annotation (e.g., max proportion < 75%)
+    >>> annotator.print_low_map_rates(map_thresh=0.75)
+    Cluster 5:
+    T-cell (0): 0.60, B-cell (1): 0.35
+
+    >>> # 3. Apply the annotations
+    >>> # For cluster '5', we decide to call it 'T-cell' using its leaf ID.
+    >>> # For cluster '8', we define a completely new annotation path.
+    >>> cluster_assignments = {
+    ...     '5': 0,  # Assign using leaf ID for T-cell
+    ...     '8': ['Stromal', 'Fibroblast']
+    ... }
+    >>> annotator.apply(threshold=0.75, cluster_map=cluster_assignments)
+
+    >>> # 4. Verify the results
+    >>> print(adata.obs[['leiden', 'ct1', 'ct2']].head())
     """
+    class ClusterMap:
+        """A simple data class to hold mapping results for a single cluster."""
+        def __init__(self, cluster, prop_new, vcounts):
+            self.cluster = cluster
+            self.prop_new = prop_new
+            self.vcounts = vcounts
+
+        def __repr__(self):
+            return f"ClusterMap({self.cluster})"
 
     def __init__(
         self,
-        adata_or_mdata: Union[sc.AnnData, md.MuData],
-        annot_cols: List[str],
-        col: str,
-        modality_key: Optional[str] = None,
-        prefix_prev: str = 'previous',
-        prefix_new: str = 'new',
-        reset: bool = True,
-        verbose: bool = False
+        adata: sc.AnnData,
+        df: pd.DataFrame,
+        annot_vars: List[str],
+        id_var: str = "rxn",
+        cluster_key: str = 'leiden',
+        verbose=False
     ):
-        """
-        Initializes the Annotate object.
+        # --- Input Validation ---
+        if not isinstance(adata, sc.AnnData):
+            raise TypeError("`adata` must be a `scanpy.AnnData` object.")
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("`df` must be a `pandas.DataFrame` object.")
+        if not is_listlike(annot_vars) or not all(isinstance(i, str) for i in annot_vars):
+            raise TypeError("`annot_vars` must be a list-like object of strings.")
+        if not isinstance(id_var, str):
+            raise TypeError("`id_var` must be a string.")
+        if not isinstance(cluster_key, str):
+            raise TypeError("`cluster_key` must be a string.")
+        
+        # svc.meta.is_key_categorical(adata, cluster_key, error=True)
+        clusters = adata.obs[cluster_key].cat.categories
 
-        Parameters
-        ----------
-        adata_or_mdata : Union[sc.AnnData, md.MuData]
-            The AnnData or MuData object. If MuData, `modality_key` is required.
-        annot_cols : List[str]
-            Original annotation columns, ordered from lowest to highest granularity
-            (e.g., ['ct1', 'ct2', 'ct3']).
-        col : str
-            The column with new clustering labels (e.g., 'leiden').
-        modality_key : Optional[str]
-            If using a MuData object, the key for the target AnnData modality.
-        prefix_prev : str
-            Prefix for renaming original annotation columns (e.g., 'previous_ct1').
-        prefix_new : str
-            Prefix for newly created annotation columns (e.g., 'new_ct1').
-        reset : bool
-            If True, removes any existing columns with the defined prefixes.
-        verbose : bool
-            If True, enables detailed print statements.
-        """
-        # --- Input Validation and Data Handling ---
-        if isinstance(adata_or_mdata, sc.AnnData):
-            self.adata = adata_or_mdata
-        elif isinstance(adata_or_mdata, md.MuData):
-            if modality_key is None:
-                raise ValueError("If a MuData object is provided, 'modality_key' must be specified.")
-            if modality_key not in adata_or_mdata.mod:
-                raise ValueError(f"Modality key '{modality_key}' not in MuData keys: {list(adata_or_mdata.mod.keys())}")
-            self.adata = adata_or_mdata[modality_key]
-        else:
-            raise TypeError("Input 'adata_or_mdata' must be an AnnData or MuData object.")
+        # --- Compatibility Checks ---
+        if id_var not in df.columns:
+            raise ValueError(f"The `id_var` '{id_var}' is not a column in the provided DataFrame `df`.")
+        if id_var not in adata.obs.columns:
+            raise ValueError(f"The `id_var` '{id_var}' is not a column in `adata.obs`.")
 
-        if not isinstance(annot_cols, list) or not annot_cols:
-            raise ValueError("'annot_cols' must be a non-empty list.")
-        if not isinstance(col, str) or not col:
-            raise ValueError("'col' must be a non-empty string.")
-        if not isinstance(prefix_prev, str):
-            raise TypeError("'prefix_prev' must be a string.")
-        if not isinstance(prefix_new, str):
-            raise TypeError("'prefix_new' must be a string.")
+        missing_annot_vars = [col for col in annot_vars if col not in df.columns]
+        if missing_annot_vars:
+            raise ValueError(f"The following `annot_vars` are not in the provided DataFrame `df`: {missing_annot_vars}")
 
-        self.annot_cols = annot_cols
-        self.col = col
-        self.prefix_prev = prefix_prev
-        self.prefix_new = prefix_new
+        if cluster_key not in adata.obs.columns:
+            raise ValueError(f"The `cluster_key` '{cluster_key}' is not a column in `adata.obs`.")
+
+        # --- Store attributes ---
+        self.adata = adata
+        self.obs = adata.obs.copy()
+        self.df = df.copy()
+        self.annot_vars = annot_vars
+        self.id_var = id_var
+        self.cluster_key = cluster_key
         self.verbose = verbose
 
-        # --- Initialize results attributes ---
-        self.proportions_df: Optional[pd.DataFrame] = None
-        self.hierarchy_df: Optional[pd.DataFrame] = None
-        self.hierarchy_lookup: Optional[pd.DataFrame] = None
-        self.inconsistent_clusters: Optional[List[Union[str, int]]] = None
+        self.clusters = clusters
+        self.hierarchy_root = None
+        self.leaf_id_map = None
+        self.mapping = {}
+        
 
-        self._print("Annotate initialized.")
-        self._print(f"Target AnnData: {f'MuData modality {repr(modality_key)}' if modality_key else 'Provided AnnData'}")
-        self._print(f"Clustering column: '{self.col}'")
-        self._print(f"Annotation columns: {self.annot_cols}")
+        # --- Build Hierarchy ---
+        self._build_hierarchy_tree()
 
-        if reset:
-            self._reset_columns()
+        # --- Align Cell Barcodes ---
+        self._align_cell_barcodes()
 
-    # --------------------------------------------------------------------------
-    # Helper Methods
-    # --------------------------------------------------------------------------
-
-    def _print(self, *args, **kwargs):
-        """Prints only if self.verbose is True."""
+        # --- Create Cluster Mapping ---
+        self._add_mapping()
+        
         if self.verbose:
-            print(*args, **kwargs)
+            print("Annotate class initialized successfully.")
 
-    def _get_prev_col_name(self, col_name: str) -> str:
-        """Constructs the 'previous' column name."""
-        return f"{self.prefix_prev}_{col_name}"
+    def _build_hierarchy_tree(self):
+        """Builds an anytree representation of the annotation hierarchy.
 
-    def _get_new_col_name(self, col_name: str) -> str:
-        """Constructs the 'new' column name."""
-        return f"{self.prefix_new}_{col_name}"
-
-    def _reset_columns(self):
-        """Removes existing prefixed columns from `adata.obs`."""
-        self._print("Resetting columns...")
-        prev_cols_to_drop = [self._get_prev_col_name(c) for c in self.annot_cols if self._get_prev_col_name(c) in self.adata.obs]
-        if prev_cols_to_drop:
-            self._print(f"  Dropping previous annotation columns: {prev_cols_to_drop}")
-            self.adata.obs.drop(columns=prev_cols_to_drop, inplace=True)
-
-        new_cols_to_drop = [self._get_new_col_name(c) for c in self.annot_cols if self._get_new_col_name(c) in self.adata.obs]
-        if new_cols_to_drop:
-            self._print(f"  Dropping new annotation columns: {new_cols_to_drop}")
-            self.adata.obs.drop(columns=new_cols_to_drop, inplace=True)
-            
-    # --------------------------------------------------------------------------
-    # Core Methods
-    # --------------------------------------------------------------------------
-
-    def annotate(self, thresh: float = 0.8, fill: str = 'no_match') -> pd.DataFrame:
+        This internal method validates that the hierarchy defined by `annot_vars`
+        is a valid tree structure (i.e., each child has only one parent) and
+        then constructs the tree. It correctly handles cases where nodes at
+        different levels share the same name.
         """
-        Automatically annotates new clusters based on previous annotations.
+        if self.verbose:
+            print("Detecting and validating hierarchy...")
+        hierarchy_df = self.df[self.annot_vars].drop_duplicates().dropna(how='all')
 
-        This method calculates the proportion of cells in each new cluster that
-        map to a previous annotation. If the proportion exceeds `thresh`, the new
-        cluster is assigned that label.
+        leaf_labels = self.df[self.annot_vars[-1]].dropna().unique()
+        self.leaf_id_map = {label: i for i, label in enumerate(leaf_labels)}
 
-        Parameters
-        ----------
-        thresh : float
-            Minimum proportion (0.0 to 1.0) for a label to be assigned.
-        fill : str
-            Value for clusters that do not meet the threshold.
+        if len(self.annot_vars) < 2:
+            warnings.warn("Warning: Less than 2 `annot_vars` provided. No hierarchy to build.")
+            self.hierarchy_root = Node("ROOT")
+            if len(self.annot_vars) == 1:
+                for label in hierarchy_df[self.annot_vars[0]].unique():
+                    Node(label, parent=self.hierarchy_root, uid=self.leaf_id_map.get(label))
+            return
 
-        Returns
-        -------
-        pd.DataFrame
-            A DataFrame with detailed mapping proportions and metrics, also
-            stored in `self.proportions_df`.
-        """
-        self._print("\n--- Starting Annotation ---")
-        self._validate_annotate_inputs(thresh)
-
-        # 1. Rename original columns to 'previous_*'
-        renamed_map = self._rename_original_columns()
-
-        # 2. Pre-calculate total sizes of each previous label for efficiency
-        prev_label_sizes = {
-            prev_col: self.adata.obs[prev_col].value_counts()
-            for prev_col in renamed_map.values()
-        }
-
-        # 3. Perform the core mapping logic
-        proportion_details, new_cluster_ids = self._calculate_mapping(renamed_map, prev_label_sizes, thresh, fill)
-
-        # 4. Format results into a final DataFrame
-        self.proportions_df = self._create_proportions_df(proportion_details, new_cluster_ids)
-        self._print("--- Annotation Finished ---\n")
-        return self.proportions_df
-
-    def recover(self, include: List[Union[str, int]] = [], fill: str = 'no_match') -> List[Union[str, int]]:
-        """
-        Corrects hierarchical inconsistencies in new annotations.
-
-        This method identifies new annotations that violate the hierarchy established
-        by the previous labels (e.g., a subtype is assigned to the wrong parent type).
-        It can then force-correct specified clusters.
-
-        Parameters
-        ----------
-        include : List[Union[str, int]]
-            A list of cluster IDs to force-correct based on the hierarchy.
-        fill : str
-            The value for unassigned annotations, which are ignored.
-
-        Returns
-        -------
-        List[Union[str, int]]
-            A list of cluster IDs found to be inconsistent *before* correction.
-            Also stored in `self.inconsistent_clusters`.
-        """
-        self._print("\n--- 🔍 Starting Hierarchy Recovery ---")
-        self._validate_recover_inputs(include)
-
-        # 1. Build and validate the hierarchy from the previous annotations
-        self._build_and_validate_hierarchy()
-
-        # 2. Identify clusters with inconsistent new annotations
-        self.inconsistent_clusters = self._identify_inconsistent_clusters(fill)
-        self._print(f"  Found {len(self.inconsistent_clusters)} inconsistent clusters.")
-
-        # 3. Correct the specified clusters
-        if include:
-            self._correct_included_clusters(include)
-        
-        self._print("--- Hierarchy Recovery Finished ---\n")
-        return self.inconsistent_clusters
-
-    def plot_heatmap(self, figsize: tuple = (10, 10), cmap: str = 'Blues', show_cbar: bool = False, nan_annot: str = "") -> Optional[plt.Axes]:
-        """
-        Generates a heatmap of inverse proportions for sub-threshold clusters.
-
-        This visualizes potential annotations for clusters that were not confidently
-        mapped. The color shows the inverse proportion ($|N \\cap L| / |L|$), helping
-        to identify if a small cluster is a pure subset of a larger original cell type.
-
-        Parameters
-        ----------
-        figsize : tuple
-            Figure size for the plot.
-        cmap : str
-            Colormap for the heatmap.
-        show_cbar : bool
-            Whether to display the color bar.
-        nan_annot : str
-            String to display for empty annotations.
-
-        Returns
-        -------
-        Optional[plt.Axes]
-            The Matplotlib Axes object for the heatmap, or None if no data is plotted.
-        """
-        self._print("\n--- Generating Heatmap ---")
-        if self.proportions_df is None:
-            raise AttributeError("The 'annotate' method must be run first.")
-
-        ax = self._plot_unmapped_heatmap(
-            proportions_df=self.proportions_df,
-            figsize=figsize,
-            cmap=cmap,
-            show_cbar=show_cbar,
-            nan_annot=nan_annot
-        )
-        self._print("--- Heatmap Generation Finished ---\n")
-
-        if ax is not None:
-            ax.grid(False)
-        return ax
-
-    def apply_annotations(self, keep_previous: bool = False) -> None:
-        """
-        Finalizes annotations by renaming 'new_*' columns to their original names.
-
-        This is the final step, making the new annotations the primary ones in `adata.obs`.
-
-        Parameters
-        ----------
-        keep_previous : bool
-            If False (default), the `previous_*` columns are deleted.
-        """
-        self._print("\n--- Applying Final Annotations ---")
-        if not isinstance(keep_previous, bool):
-            raise TypeError("'keep_previous' must be a boolean.")
-
-        for col_name in self.annot_cols:
-            prev_name = self._get_prev_col_name(col_name)
-            new_name = self._get_new_col_name(col_name)
-
-            # Rename 'new_*' to original name
-            if new_name in self.adata.obs.columns:
-                if col_name in self.adata.obs.columns and col_name != new_name:
-                    warnings.warn(f"'{col_name}' exists and will be overwritten by '{new_name}'.", UserWarning)
-                self.adata.obs.rename(columns={new_name: col_name}, inplace=True)
-                self._print(f"  Renamed '{new_name}' to '{col_name}'.")
-            else:
-                warnings.warn(f"Column '{new_name}' not found. Cannot apply annotation for '{col_name}'.", UserWarning)
-
-            # Optionally delete 'previous_*' column
-            if not keep_previous and prev_name in self.adata.obs.columns:
-                self._print(f"  Deleting '{prev_name}'.")
-                del self.adata.obs[prev_name]
-        
-        self._print("--- Annotation Application Finished ---\n")
-
-    # --------------------------------------------------------------------------
-    # Private Refactored Helper Functions
-    # --------------------------------------------------------------------------
-
-    def _validate_annotate_inputs(self, thresh: float):
-        """Validates inputs for the annotate method."""
-        if self.col not in self.adata.obs.columns:
-            raise ValueError(f"Clustering column '{self.col}' not found in `adata.obs`.")
-        missing_cols = [c for c in self.annot_cols if c not in self.adata.obs.columns]
-        if missing_cols:
-            raise ValueError(f"Original annotation columns not found: {missing_cols}")
-        if not (0.0 <= thresh <= 1.0):
-            raise ValueError("'thresh' must be between 0.0 and 1.0.")
-        self._print("  Input validation passed.")
-
-    def _rename_original_columns(self) -> Dict[str, str]:
-        """Renames original annotation columns with the 'previous' prefix."""
-        self._print("  Renaming original annotation columns...")
-        renamed_map = {}
-        for old_col in self.annot_cols:
-            prev_col_name = self._get_prev_col_name(old_col)
-            if prev_col_name in self.adata.obs.columns and old_col != prev_col_name:
-                warnings.warn(f"Target '{prev_col_name}' exists and will be overwritten.", UserWarning)
-            self.adata.obs.rename(columns={old_col: prev_col_name}, inplace=True)
-            renamed_map[old_col] = prev_col_name
-        return renamed_map
-    
-    def _calculate_mapping(self, renamed_map: dict, prev_label_sizes: dict, thresh: float, fill: str) -> Tuple[list, pd.Index]:
-        """Performs the core annotation mapping logic."""
-        self._print(f"  Mapping clusters in '{self.col}'...")
-        is_cat = isinstance(self.adata.obs[self.col].dtype, pd.CategoricalDtype)
-        cluster_ids = self.adata.obs[self.col].cat.categories if is_cat else pd.Index(np.sort(self.adata.obs[self.col].unique()))
-        cluster_sizes = self.adata.obs.groupby(self.col, observed=is_cat).size()
-
-        if cluster_sizes.empty:
-            warnings.warn("No clusters found.", UserWarning)
-            return [], pd.Index([])
-
-        proportion_details = []
-        for orig_col, prev_col in renamed_map.items():
-            new_annot_col = self._get_new_col_name(orig_col)
-            counts = self.adata.obs.dropna(subset=[prev_col]).groupby([self.col, prev_col], observed=is_cat).size()
-            
-            final_mapping = {}
-            for cid in cluster_ids:
-                best_label, prop, inv_prop = np.nan, 0.0, np.nan
-                assigned_label = fill
-                
-                if cid in counts.index.get_level_values(0):
-                    group_counts = counts.loc[cid]
-                    if not group_counts.empty:
-                        best_label = group_counts.idxmax()
-                        best_count = group_counts.max()
-                        total_cluster_size = cluster_sizes.get(cid, 0)
-                        
-                        if total_cluster_size > 0:
-                            prop = best_count / total_cluster_size
-                            if prop >= thresh:
-                                assigned_label = best_label
-                            else: # Only calculate inverse for sub-threshold
-                                total_label_size = prev_label_sizes.get(prev_col, {}).get(best_label, 0)
-                                if total_label_size > 0:
-                                    inv_prop = best_count / total_label_size
-                
-                proportion_details.append({
-                    'cluster_id': cid, 'annotation_level': orig_col, 
-                    'best_previous_label': best_label, 'proportion': prop, 
-                    'inverse_proportion': inv_prop
-                })
-                final_mapping[cid] = assigned_label
-
-            self.adata.obs[new_annot_col] = self.adata.obs[self.col].map(final_mapping).astype('category')
-        
-        return proportion_details, cluster_ids
-
-    def _create_proportions_df(self, details: list, cluster_ids: pd.Index) -> pd.DataFrame:
-        """Pivots and formats the final proportions DataFrame."""
-        self._print("  Creating proportions DataFrame...")
-        if not details:
-            warnings.warn("No proportion details generated.", UserWarning)
-            return pd.DataFrame(index=pd.Index(cluster_ids, name=self.col))
-
-        long_df = pd.DataFrame(details)
-        try:
-            pivoted_df = long_df.pivot(
-                index='cluster_id', columns='annotation_level',
-                values=['best_previous_label', 'proportion', 'inverse_proportion']
-            )
-            pivoted_df = pivoted_df.reindex(cluster_ids)
-            pivoted_df.index = pivoted_df.index.astype(self.adata.obs[self.col].dtype)
-            pivoted_df.index.name = self.col
-            pivoted_df.columns = pivoted_df.columns.rename(['metric', 'annotation_level'])
-            return pivoted_df.sort_index()
-        except Exception as e:
-            warnings.warn(f"Could not pivot DataFrame, returning long format. Error: {e}", UserWarning)
-            return long_df.set_index('cluster_id')
-
-    def _validate_recover_inputs(self, include: list):
-        """Validates inputs for the recover method."""
-        if self.proportions_df is None:
-            raise AttributeError("'annotate' must be run first.")
-        if not isinstance(include, list):
-            raise TypeError("'include' must be a list.")
-        
-        prev_cols = [self._get_prev_col_name(c) for c in self.annot_cols]
-        new_cols = [self._get_new_col_name(c) for c in self.annot_cols]
-        missing_cols = [c for c in prev_cols + new_cols if c not in self.adata.obs]
-        if missing_cols:
-            raise ValueError(f"Required columns missing from `adata.obs`: {missing_cols}")
-
-        valid_cids = set(self.adata.obs[self.col].unique())
-        invalid_ids = [c for c in include if c not in valid_cids]
-        if invalid_ids:
-            raise ValueError(f"Invalid cluster IDs in 'include': {invalid_ids}")
-
-    def _build_and_validate_hierarchy(self):
-        """Builds a lookup table from the previous annotations and validates its hierarchy."""
-        self._print("  Detecting and validating hierarchy...")
-        prev_cols = [self._get_prev_col_name(c) for c in self.annot_cols]
-        self.hierarchy_df = self.adata.obs[prev_cols].drop_duplicates().dropna(how='all')
-        if self.hierarchy_df.empty:
-            raise ValueError("No hierarchy structure found in 'previous_*' columns.")
-        
-        # Validate hierarchy
-        for i in range(len(self.annot_cols) - 1):
-            higher_level, lower_level = self.annot_cols[i], self.annot_cols[i+1]
-            prev_higher = self._get_prev_col_name(higher_level)
-            prev_lower = self._get_prev_col_name(lower_level)
-            
-            # Check if any lower-level label maps to more than one higher-level label
-            is_lower_cat = isinstance(self.hierarchy_df[prev_lower], pd.CategoricalDtype)
-            inconsistency_check = self.hierarchy_df.groupby(prev_lower, observed=is_lower_cat)[prev_higher].nunique()
+        for i in range(1, len(self.annot_vars)):
+            parent_col = self.annot_vars[i-1]
+            child_col = self.annot_vars[i]
+            inconsistency_check = hierarchy_df.dropna(subset=[child_col]).groupby(child_col, observed=True)[parent_col].nunique()
             if inconsistency_check.max() > 1:
                 offenders = inconsistency_check[inconsistency_check > 1].index.tolist()
-                raise ValueError(f"Hierarchy invalid: '{lower_level}' maps to multiple '{higher_level}'. Offenders: {offenders[:3]}")
+                raise ValueError(
+                    f"Hierarchy is invalid. Labels in '{child_col}' map to multiple "
+                    f"labels in '{parent_col}'.\nOffending labels: {offenders[:5]}"
+                )
 
-        # Create lookup table using the highest resolution annotation as the key
-        highest_res_col = prev_cols[-1]
-        self.hierarchy_lookup = self.hierarchy_df.drop_duplicates(subset=highest_res_col).set_index(highest_res_col)
-        self._print("  Hierarchy validation passed.")
+        self.hierarchy_root = Node("ROOT")
+        node_map = {(): self.hierarchy_root} 
 
-    def _identify_inconsistent_clusters(self, fill: str) -> List[Union[str, int]]:
-        """Identifies clusters whose new annotations violate the established hierarchy."""
-        self._print("  Identifying inconsistent clusters...")
-        new_cols = [self._get_new_col_name(c) for c in self.annot_cols]
-        inconsistent_list = []
+        for _, row in hierarchy_df.iterrows():
+            path_prefix = ()
+            for label in row:
+                if pd.isna(label):
+                    break
+                current_path = path_prefix + (label,)
+                if current_path not in node_map:
+                    parent_node = node_map[path_prefix]
+                    node = Node(label, parent=parent_node)
+                    node_map[current_path] = node
+                path_prefix = current_path
         
-        # Get unique annotations for each cluster
-        cluster_annots = self.adata.obs[[self.col] + new_cols].drop_duplicates()
+        for leaf in self.hierarchy_root.leaves:
+            if leaf.name in self.leaf_id_map:
+                leaf.uid = self.leaf_id_map[leaf.name]
         
-        for _, row in cluster_annots.iterrows():
-            cid = row[self.col]
-            assigned_annots = row[new_cols]
-            
-            if (assigned_annots == fill).any():
-                continue
+        if self.verbose:
+            print("Hierarchy tree built successfully.")
 
-            highest_assigned = assigned_annots.iloc[-1]
-            try:
-                # Get the expected parent annotations from the hierarchy
-                expected_parents = self.hierarchy_lookup.loc[highest_assigned]
-                
-                # Check if the assigned parent annotations match the expected ones
-                for i in range(len(self.annot_cols) - 1):
-                    assigned_parent = assigned_annots.iloc[i]
-                    expected_parent = expected_parents.iloc[i]
-                    if assigned_parent != expected_parent:
-                        inconsistent_list.append(cid)
-                        break # Move to next cluster once an inconsistency is found
-            except KeyError:
-                warnings.warn(f"Cluster {cid}: Assigned label '{highest_assigned}' not in hierarchy lookup.", UserWarning)
-        
-        return inconsistent_list
+    def _align_cell_barcodes(self):
+        """Aligns cell barcodes between `adata.obs` and the reference `df`.
 
-    def _correct_included_clusters(self, include: list):
-        """Force-corrects the annotations for a given list of cluster IDs."""
-        self._print(f"  Correcting {len(include)} specified clusters...")
-        new_cols = [self._get_new_col_name(c) for c in self.annot_cols]
-        corrected_count = 0
+        This internal method handles cases where cell barcodes may require a
+        batch identifier to be unique. It modifies `self.df` in place to ensure
+        its index aligns with `self.adata.obs.index`.
+        """
+        if self.verbose:
+            print("Aligning cell barcodes...")
 
-        for cid in include:
-            try:
-                best_label = self.proportions_df.loc[cid, ('best_previous_label', self.annot_cols[-1])]
-                if pd.isna(best_label):
-                    warnings.warn(f"Cluster {cid}: NaN best label, cannot correct.", UserWarning)
-                    continue
+        self.obs['detected_batch'] = self.obs.index.str.split('-').str[1]
 
-                # Get the correct full hierarchy for the best label
-                correct_hierarchy = self.hierarchy_lookup.loc[best_label]
-                
-                # Apply the correction to adata.obs
-                mask = self.adata.obs[self.col] == cid
-                for i, level_name in enumerate(self.annot_cols):
-                    new_col_name = new_cols[i]
-                    # The highest level's label is `best_label`, parents are from lookup
-                    correct_label = best_label if i == len(self.annot_cols) - 1 else correct_hierarchy.iloc[i]
-
-                    # Ensure the category exists before assignment
-                    if not isinstance(self.adata.obs[new_col_name], pd.CategoricalDtype):
-                        self.adata.obs[new_col_name] = self.adata.obs[new_col_name].astype('category')
-                    if correct_label not in self.adata.obs[new_col_name].cat.categories:
-                        self.adata.obs[new_col_name] = self.adata.obs[new_col_name].cat.add_categories([correct_label])
-                    
-                    self.adata.obs.loc[mask, new_col_name] = correct_label
-                corrected_count += 1
-            except KeyError:
-                warnings.warn(f"Cluster {cid}: Best label '{best_label}' not in hierarchy. Skipping correction.", UserWarning)
-            except Exception as e:
-                warnings.warn(f"Error correcting cluster {cid}: {e}", UserWarning)
-        
-        self._print(f"  Finished correction: {corrected_count} cluster(s) updated.")
-
-    def _plot_unmapped_heatmap(self, proportions_df, **kwargs) -> Optional[plt.Axes]:
-        """Internal plotting logic for the heatmap."""
         try:
-            # Filter for clusters where inverse proportion was calculated for at least one level
-            idx = pd.IndexSlice
-            sub_df = proportions_df.loc[proportions_df.loc[:, idx['inverse_proportion', :]].notna().any(axis=1)]
+            id_to_batch_map = get_functional_dependency(self.obs, (self.id_var, 'detected_batch'))
+        except ValueError as e:
+            raise ValueError(f"Could not create a unique mapping from '{self.id_var}' to 'detected_batch' in adata.obs. {e}")
 
-            if sub_df.empty:
-                warnings.warn("No sub-threshold clusters with inverse proportions to plot.", UserWarning)
-                return None
+        self.df['correct_batch'] = self.df[self.id_var].map(id_to_batch_map)
+        self.df.dropna(inplace=True)
 
-            heatmap_data = sub_df.loc[:, idx['inverse_proportion', :]].astype(float)
-            annot_labels = pd.DataFrame(index=sub_df.index, columns=heatmap_data.columns, dtype=str)
+        nucleotides = self.df.index.str.split('-').str[0]
+        new_index = nucleotides + '-' + self.df['correct_batch'].astype(str)
+
+        self.df.index = new_index
+        self.df.drop(columns=['correct_batch', self.id_var], inplace=True)
+
+        if self.verbose:
+            print("Cell barcodes aligned.")
+
+    def _add_mapping(self):
+        """Calculates annotation proportions for each cluster.
+
+        This internal method iterates through each cluster in `adata`, finds the
+        common cells with the reference `df`, and calculates the proportion of
+        each granular annotation within those common cells. Results are stored in
+        `self.mapping`.
+        """
+        if self.verbose:
+            print("Mapping clusters to annotations...")
+        self.mapping = {}
+        granular_annot_col = self.annot_vars[-1]
+
+        for cluster in self.clusters:
+            cluster_cells = self.obs.index[self.obs[self.cluster_key] == cluster]
+            common_cells = cluster_cells.intersection(self.df.index)
             
-            # Create annotation strings: "Label (Inv. Prop)"
-            levels = heatmap_data.columns.get_level_values('annotation_level').unique()
-            for level in levels:
-                labels = sub_df[('best_previous_label', level)]
-                inv_props = sub_df[('inverse_proportion', level)]
-                annot_labels[('inverse_proportion', level)] = [
-                    f"{lbl} ({ip:.2f})" if pd.notna(ip) else str(lbl) if pd.notna(lbl) else ""
-                    for lbl, ip in zip(labels, inv_props)
-                ]
+            if len(cluster_cells) > 0:
+                prop_new = 1 - (len(common_cells) / len(cluster_cells))
+            else:
+                prop_new = 0.0
 
-            fig, ax = plt.subplots(figsize=kwargs.get('figsize', (10, 10)))
-            sns.heatmap(
-                heatmap_data,
-                annot=annot_labels,
-                fmt='s',
-                cmap=kwargs.get('cmap', 'Blues'),
-                cbar=kwargs.get('show_cbar', False),
-                cbar_kws={'label': 'Inverse Proportion (|N∩L|/|L|)'},
-                linewidths=0.5,
-                linecolor='black',
-                xticklabels=levels,
-                ax=ax
+            if not common_cells.empty:
+                vcounts = self.df.loc[common_cells, granular_annot_col].value_counts(normalize=True)
+            else:
+                vcounts = pd.Series(dtype=float)
+
+            vcounts = vcounts[vcounts > 0]
+            self.mapping[cluster] = self.ClusterMap(
+                cluster=cluster,
+                prop_new=prop_new,
+                vcounts=vcounts
             )
-            ax.set_title('Potential Annotation Mapping (Inverse Proportion)')
-            ax.set_ylabel('New Clusters (Sub-Threshold)')
-            ax.set_xlabel('Annotation Levels')
-            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-            fig.tight_layout()
-            return ax
+        if self.verbose:
+            print("Cluster mapping complete.")
 
-        except Exception as e:
-            warnings.warn(f"Heatmap generation failed: {e}", UserWarning)
-            return None
+    def get_max_map_rates(self) -> Dict[str, float]:
+        """Gets the maximum mapping rate for each cluster.
+
+        Returns
+        -------
+        Dict[str, float]
+            A dictionary where keys are cluster labels and values are the
+            highest proportion of any single annotation within that cluster.
+        """
+        max_map_rates = {}
+        for cluster in self.clusters:
+            cluster_map = self.mapping[cluster]
+            max_rate = cluster_map.vcounts.max() if not cluster_map.vcounts.empty else 0
+            max_map_rates[cluster] = max_rate
+        return max_map_rates
+
+    def get_high_prop_new_rates(self, thresh: float = 0.75) -> pd.Series:
+        """Gets cluster proportions for clusters whose prop_new is above a confidence threshold.
+
+        Parameters
+        ----------
+        thresh : float, optional
+            The confidence threshold. Any cluster whose prop_new is greater than this
+            value will be included. Defaults to 0.75.
+
+        Returns
+        -------
+        pd.Series
+            A multi-indexed Series showing the annotation proportions for all
+            high-confidence clusters.
+        """
+
+        high_prop_new_rates = {i: self.mapping[i].prop_new for i in self.clusters if self.mapping[i].prop_new >= thresh}
+
+        return pd.Series(high_prop_new_rates)
+
+    def get_low_map_rates(self, thresh: float = 0.75) -> pd.Series:
+        """Gets annotation proportions for clusters below a confidence threshold.
+
+        Parameters
+        ----------
+        thresh : float, optional
+            The confidence threshold. Any cluster whose top-matching annotation
+            has a proportion less than this value will be included.
+            Defaults to 0.75.
+
+        Returns
+        -------
+        pd.Series
+            A multi-indexed Series showing the annotation proportions for all
+            low-confidence clusters.
+        """
+        low_map_rates = []
+        low_map_rate_clusters = []
+        for cluster in self.clusters:
+            cluster_map = self.mapping[cluster]
+            max_rate = cluster_map.vcounts.max() if not cluster_map.vcounts.empty else 0.0
+            if max_rate < thresh:
+                low_map_rates.append(cluster_map.vcounts)
+                low_map_rate_clusters.append(cluster)
+        
+        if not low_map_rates:
+            return pd.Series(dtype=float)
+            
+        low_map_rates = pd.concat(low_map_rates, axis=0, keys=low_map_rate_clusters)
+        return low_map_rates
+
+    def print_low_map_rates(self, map_thresh: float = 0.75, print_thresh: float = 0.05):
+        """Prints a summary of clusters with low mapping confidence.
+
+        This is a helper method for interactively identifying which clusters
+        will require manual annotation in the `apply` step.
+
+        Parameters
+        ----------
+        map_thresh : float, optional
+            The confidence threshold to identify low-mapping clusters.
+            Defaults to 0.75.
+        print_thresh : float, optional
+            The minimum proportion for an annotation to be printed.
+            Defaults to 0.05.
+        """
+        low_map_rates = self.get_low_map_rates(map_thresh)
+        if low_map_rates.empty:
+            print(f"No clusters found with max mapping rate below {map_thresh}.")
+        else:
+            for cluster in low_map_rates.index.get_level_values(0).unique():
+                print(f"Cluster {cluster}:")
+                proportions = low_map_rates.loc[cluster]
+                print_str = ', '.join([
+                    f"{ct} ({self.leaf_id_map.get(ct, 'N/A')}): {prop:.2f}"
+                    for ct, prop in proportions.items() if prop >= print_thresh
+                ])
+                print(print_str)
+                print()
+
+    def apply(self, threshold: float, cluster_map: Dict[str, Any] = None):
+        """Applies annotations to `adata.obs` based on mapping rates.
+
+        This method performs the final annotation step. For each cluster, if the
+        proportion of its most common annotation is at or above the `threshold`,
+        it is automatically assigned that annotation's full hierarchy. For all
+        clusters falling below the threshold, a manual assignment must be
+        provided in the `cluster_map` dictionary.
+
+        This method modifies `self.adata.obs` in place.
+
+        Parameters
+        ----------
+        threshold : float
+            The minimum proportion for a cluster to be automatically annotated.
+            Must be between 0 and 1.
+        cluster_map : Dict[str, Any], optional
+            A dictionary to manually assign annotations to clusters that fall
+            below the `threshold`. Keys are cluster labels. Values can be:
+            - An integer (a leaf ID from `self.leaf_id_map`).
+            - A list of strings representing the full annotation hierarchy.
+            Defaults to None.
+
+        Raises
+        ------
+        ValueError
+            If any cluster falls below the `threshold` and is not provided in
+            the `cluster_map`.
+        """
+        if cluster_map is None:
+            cluster_map = {}
+
+        unmapped_clusters = []
+        for cluster in self.clusters:
+            max_rate = self.mapping[cluster].vcounts.max() if not self.mapping[cluster].vcounts.empty else 0
+            if max_rate < threshold and cluster not in cluster_map:
+                unmapped_clusters.append(cluster)
+
+        if unmapped_clusters:
+            raise ValueError(
+                f"All clusters must be accounted for. The following clusters have a max "
+                f"mapping rate below the threshold ({threshold}) and are not in the "
+                f"provided `cluster_map` dictionary: {unmapped_clusters}"
+            )
+
+        id_to_leaf_label = {v: k for k, v in self.leaf_id_map.items()}
+        leaf_nodes = {node.name: node for node in self.hierarchy_root.leaves}
+        new_annots_df = pd.DataFrame(index=self.adata.obs.index, columns=self.annot_vars)
+
+        if self.verbose:
+            print("Applying annotations...")
+        for cluster in self.clusters:
+            cluster_cells = self.obs.index[self.obs[self.cluster_key] == cluster]
+            max_rate = self.mapping[cluster].vcounts.max() if not self.mapping[cluster].vcounts.empty else 0
+            annotation_path = None
+
+            if max_rate >= threshold:
+                top_annot_label = self.mapping[cluster].vcounts.idxmax()
+                if top_annot_label in leaf_nodes:
+                    node = leaf_nodes[top_annot_label]
+                    annotation_path = [n.name for n in node.path[1:]]
+            else:
+                manual_map = cluster_map[cluster]
+                if isinstance(manual_map, int):
+                    if manual_map not in id_to_leaf_label:
+                        raise ValueError(f"Leaf ID {manual_map} for cluster '{cluster}' not found.")
+                    leaf_label = id_to_leaf_label[manual_map]
+                    if leaf_label not in leaf_nodes:
+                        raise ValueError(f"Leaf label '{leaf_label}' for cluster '{cluster}' not found in hierarchy.")
+                    node = leaf_nodes[leaf_label]
+                    annotation_path = [n.name for n in node.path[1:]]
+                elif is_listlike(manual_map):
+                    if len(manual_map) != len(self.annot_vars):
+                        raise ValueError(f"Provided path for cluster '{cluster}' has length {len(manual_map)}, expected {len(self.annot_vars)}.")
+                    annotation_path = manual_map
+                else:
+                    raise TypeError(f"Unsupported map type for cluster '{cluster}': {type(manual_map)}.")
+
+            if annotation_path:
+                padded_path = annotation_path + [pd.NA] * (len(self.annot_vars) - len(annotation_path))
+                new_annots_df.loc[cluster_cells, self.annot_vars] = padded_path
+
+        for col in self.annot_vars:
+            self.adata.obs[col] = new_annots_df[col]
+            self.adata.obs[col] = self.adata.obs[col].astype('category')
+        
+        if self.verbose:
+            print("Annotations successfully applied to `adata.obs`.")
+
+    def show_tree(self):
+        """Prints a visual representation of the detected annotation hierarchy.
+        
+        Leaf nodes with assigned IDs will be marked.
+        """
+        if not self.hierarchy_root:
+            print("Hierarchy tree has not been built.")
+            return
+            
+        print("--- Detected Annotation Hierarchy ---")
+        for pre, _, node in RenderTree(self.hierarchy_root):
+            if hasattr(node, 'uid') and node.uid is not None:
+                print(f"{pre}{node.name} (ID: {node.uid})")
+            else:
+                print(f"{pre}{node.name}")
+        print("-----------------------------------")
 
     @staticmethod
     def annotation(adata: sc.AnnData, 
