@@ -171,7 +171,7 @@ def get_faulty_bcs(mdata: md.MuData,
             faulty_bcs[chip_num][bctype] = bcs_above_thresh
             faulty_counts[chip_num][bctype] = excluded_counts
 
-        if any([len(i[1]) > 0 for i in faulty_bcs[chip_num]]):
+        if any([len(faulty_bcs[chip_num][i]) > 0 for i in faulty_bcs[chip_num]]):
             faulty_bcs_show = {bctype: ', '.join(bcs) for bctype, bcs in faulty_bcs[chip_num].items() if len(bcs) > 0}
 
             warnings.warn(
