@@ -303,12 +303,14 @@ def scatter(data: Union[sc.AnnData, md.MuData],
         return fig, ax, scpc
     
     # Get ParamManagers
-    plot_label_params = plot_label_params or {}
-    cbar_params = cbar_params or {}
-    legend_params = legend_params or {}
+    plot_label_params = (plot_label_params or {}).copy()
+    cbar_params = (cbar_params or {}).copy()
+    legend_params = (legend_params or {}).copy()
+
     plot_label_params.update({'invert': invert})
     cbar_params.update({'invert': invert})
     user_params = {'plot_label': plot_label_params, 'cbar': cbar_params, 'legend': legend_params}
+
     configs = {plot_type: get_pm(plot_type).get_params(user_params[plot_type]) for plot_type in user_params}
 
     if plot_data is not None: # in case its already been computed
