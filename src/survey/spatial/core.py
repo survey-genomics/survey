@@ -1154,7 +1154,7 @@ class Chip:
             welldata[f'int-bc-id{i}'] = mapped_values.astype('Int64')  # This handles NaN automatically
 
         # Add segmentation info
-            welldata = welldata.join(self.seg)
+        welldata = welldata.join(self.seg)
 
 
         return welldata
