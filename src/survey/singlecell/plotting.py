@@ -303,12 +303,14 @@ def scatter(data: Union[sc.AnnData, md.MuData],
         return fig, ax, scpc
     
     # Get ParamManagers
-    plot_label_params = plot_label_params or {}
-    cbar_params = cbar_params or {}
-    legend_params = legend_params or {}
+    plot_label_params = (plot_label_params or {}).copy()
+    cbar_params = (cbar_params or {}).copy()
+    legend_params = (legend_params or {}).copy()
+
     plot_label_params.update({'invert': invert})
     cbar_params.update({'invert': invert})
     user_params = {'plot_label': plot_label_params, 'cbar': cbar_params, 'legend': legend_params}
+
     configs = {plot_type: get_pm(plot_type).get_params(user_params[plot_type]) for plot_type in user_params}
 
     if plot_data is not None: # in case its already been computed
@@ -510,6 +512,9 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
         if match_color is True:
             cdict_labeled = dict(zip(new_index_labeled, [cdict[i] for i in centroids.index]))
             cdict_legend = dict(zip(new_index_legend, [cdict[i] for i in centroids.index]))
+            if configs['legend']['show_all_cats'] is not None:
+                mapper = dict(zip(centroids.index, new_index_legend))
+                configs['legend']['show_all_cats'] = configs['legend']['show_all_cats'].map(mapper)
         centroids.index = new_index_labeled
 
     # Plot the centroids with labels
@@ -517,7 +522,7 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
 
     # Add legend if requested
     if legend:
-        if cdict is None:
+        if cdict_legend is None:
             raise ValueError(
                 "cdict must be provided to plot legend. "
                 "Set match_color=True to get cdict."

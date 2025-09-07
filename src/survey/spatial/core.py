@@ -167,7 +167,7 @@ class Array:
     wells : pd.DataFrame
         A DataFrame containing coordinates and IDs for each well.
     verts : dict
-        A dictionary mapping well IDs to their vertex coordinates.
+        A dictionary mapping well ID to their vertex coordinates.
     space : dict
         A dictionary with spacing and limit information.
     lims : dict
@@ -1154,7 +1154,7 @@ class Chip:
             welldata[f'int-bc-id{i}'] = mapped_values.astype('Int64')  # This handles NaN automatically
 
         # Add segmentation info
-            welldata = welldata.join(self.seg)
+        welldata = welldata.join(self.seg)
 
 
         return welldata
@@ -1418,4 +1418,3 @@ def validate_chipnums(chipset: ChipSet,
         raise ValueError(f"Chip numbers not found: {chips_not_found}")
     
     return chipnums
-

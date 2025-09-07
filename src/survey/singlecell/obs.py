@@ -237,11 +237,14 @@ def transfer_obs(mdata: md.MuData,
         new_col_name = '.'.join([mods[0], column])
         
         # Only transfer values for barcodes that exist in both modalities
-        source_data = mdata[mods[0]].obs[column]
+        source_obs = mdata[mods[0]].obs
         target_obs_names = mdata[mods[1]].obs_names
         
-        # Use .loc with target obs_names to ensure proper alignment
-        mdata[mods[1]].obs[new_col_name] = source_data.loc[target_obs_names]
+        common_barcodes = source_obs.index.intersection(target_obs_names)
+        
+        # Create a new series with data for common barcodes, then reindex to match target obs
+        new_col_data = pd.Series(source_obs.loc[common_barcodes, column], index=common_barcodes)
+        mdata[mods[1]].obs[new_col_name] = new_col_data.reindex(target_obs_names)
 
     if meta:
 
@@ -251,4 +254,3 @@ def transfer_obs(mdata: md.MuData,
             for prop in key_props[k]:
                 transfer_meta(mdata, mods, k, prop)
 
-                

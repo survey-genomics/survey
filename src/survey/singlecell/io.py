@@ -263,7 +263,7 @@ class CellrangerOutdir:
                     self.paths[sample]['filtered_bcs'] = filtered_bcs_path
         else:
             self.paths[self.sampletag] = {}
-            raw_h5_path = path_to_crout / 'outs/multi/count/raw_feature_bc_matrix.h5'
+            raw_h5_path = path_to_crout / 'outs/raw_feature_bc_matrix.h5'
 
             self.raw_h5_path = raw_h5_path
             # self.paths[self.sampletag]['raw_h5'] = raw_h5_path
