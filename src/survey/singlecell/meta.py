@@ -13,6 +13,21 @@ import mudata as md
 from survey.genutils import UniqueDataFrame, is_listlike
 from survey.singlecell.scutils import get_color_mapper, convert_to_categorical
 
+# Purpose
+# This module provides functions to manage and validate category-level metadata
+# within AnnData and MuData objects. It allows users to add, update, remove,
+# and query metadata associated with specific categories in the dataset.
+# Metadata is stored in a structured way in `adata.uns['meta']`, where each key
+# corresponds to a categorical column in `adata.obs`, and the value is a
+# DataFrame containing the metadata for that column.
+# This is a make-shift solution to a long-standing gripe with categorical columns in
+# pandas dataframes, which can't natively store metadata for individual categories. For example, 
+# attaching "colors" to individual cell clusters within the dataset: Scanpy's solution is to store 
+# colors in `.uns['<column_name>_colors']`, but this is not very scalable or user-friendly. The `meta` 
+# dictionary allows for storing metadata for any categorical column in the `.obs` in a more organized 
+# manner. It avoids clogging up the `.obs` with too many auxiliary columns, especially when there are 
+# functional dependencies between them.
+#
 # Design/Implementation
 # Functions are single purpose and explicit about what they are checking and doing.
 # Convenience functions will *mostly* string together single-purpose functions.
@@ -699,14 +714,15 @@ def add_prop_to_obs(adata: sc.AnnData,
 def transfer_meta(mdata: md.MuData, 
                   mods: Tuple[str, str], 
                   key: str, 
-                  prop: str) -> None:
+                  prop: str,
+                  prefix: bool=True) -> None:
     """
     Transfers metadata for a key between modalities in a MuData object.
 
     This is typically used after transferring an `.obs` column from a source
     modality to a target modality (e.g., via `muon.pp.transfer_obs`).
-    It assumes `mdata[target_mod].obs` contains a column named
-    `f'{source_mod}.{key}'`.
+    If `prefix`, it assumes `mdata[target_mod].obs` contains a column named
+    `f'{source_mod}.{key}'`, otherwise it assumes the column is named `key`.
 
     Parameters
     ----------
@@ -718,6 +734,10 @@ def transfer_meta(mdata: md.MuData,
         The original key in the source modality.
     prop : str
         The metadata property to transfer.
+    prefix : bool, optional
+        If True, the key in the target modality will be prefixed with
+        the source modality name (e.g., 'mod1.key'). If False, the key
+        remains unchanged. Default is True.
 
     Raises
     ------
@@ -738,8 +758,56 @@ def transfer_meta(mdata: md.MuData,
 
     mapper = get_cat_dict(mdata[mods[0]], key, prop)
 
-    add_metadata(mdata[mods[1]], '.'.join([mods[0], key]), prop, mapper=mapper)
+    if prefix:
+        key = '.'.join([mods[0], key])
 
+    add_metadata(mdata[mods[1]], key, prop, mapper=mapper)
+
+
+def print_meta(data: Union[sc.AnnData, md.MuData]) -> None:
+    '''
+    Prints a summary of the metadata structure in `adata.uns['meta']`.
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object to inspect.
+    '''
+
+    def _print_meta(adata: sc.AnnData, mod=None) -> None:
+        if mod is None:
+            data_string = "adata"
+        else:
+            data_string = f"mdata['{mod}']"
+
+        if not meta_exists(adata, error=False):
+            print(f"No metadata found in {data_string}.uns['meta'].")
+        else:
+            for key in adata.uns['meta']:
+                n_cats = len(adata.uns['meta'][key].index)
+                n_props = len(adata.uns['meta'][key].columns)
+                if n_props == 0:
+                    props_str = "No properties"
+                else:
+                    props = list(adata.uns['meta'][key].columns)
+                    props_str = ', '.join(props)
+                    if len(props_str) > MAX_LEN_KEYS_REPR:
+                        props_str = props_str[:MAX_LEN_KEYS_REPR] + '...'
+                    props_str = f"{n_props} properties: {props_str}"
+                print(f" - '{key}': {n_cats} categories, {props_str}")
+            print()
+        return
+
+    if isinstance(data, md.MuData):
+        for mod in data.mod.keys():
+            print(f"Modality: {mod}")
+            _print_meta(data[mod])
+    elif isinstance(data, sc.AnnData):
+        _print_meta(data)
+    else:
+        raise ValueError('Param `data` must be an AnnData or MuData object.')
+    
+    return
 
 # Complex Convenience Functions
 
@@ -955,3 +1023,59 @@ def get_key_props(mdata: md.MuData,
 
     return key_props
 
+
+def convert_cat_keys(adata: sc.AnnData, 
+                     keys: Union[str, List[str]], 
+                     to: Union[type, str]) -> None:
+    """
+    Converts the category dtype of specified keys in both adata.obs and adata.uns['meta'].
+    That is, to convert the value to either `int` or `str`, while preserving the
+    categorical dtype.
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object to modify.
+    keys : str or list of str
+        The key or keys to convert.
+    to : type or str
+        The target type for the categories, either `int` or `str`.
+
+    Raises
+    ------
+    ValueError
+        If `to` is not `int` or `str`, or if categories cannot be converted.
+    """
+    is_adata(adata, error=True)
+    meta_exists(adata, error=True)
+
+    if to not in [int, str]:
+        raise ValueError("`to` must be either int or str.")
+
+    if not is_listlike(keys):
+        keys = [keys]
+
+    for key in keys:
+        key_exists(adata, key, error=True)
+        is_key_categorical(adata, key, error=True)
+        meta_key_exists(adata, key, error=True)
+
+        # Check if conversion is possible before applying changes
+        try:
+            adata.obs[key].cat.categories.astype(to)
+        except (ValueError, TypeError):
+            raise ValueError(f"Categories in adata.obs['{key}'] cannot be converted to {to}.")
+        
+        try:
+            adata.uns['meta'][key].index.astype(to)
+        except (ValueError, TypeError):
+            raise ValueError(f"Index of adata.uns['meta']['{key}'] cannot be converted to {to}.")
+
+    for key in keys:
+        # Convert adata.obs[key] categories
+        adata.obs = convert_to_categorical(adata.obs, key, via=to, verbose=False)
+        
+        # Convert adata.uns['meta'][key] index
+        adata.uns['meta'][key].index = adata.uns['meta'][key].index.astype(to)
+    
+    return
