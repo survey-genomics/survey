@@ -3,6 +3,7 @@ import itertools as it
 import logging
 from typing import List, Optional, Tuple
 from pathlib import Path
+import warnings
 
 # Standard libs
 import numpy as np
@@ -20,7 +21,8 @@ import mudata as md
 # Survey libs
 from survey.singlecell.io import read_data, write_data
 from survey.spatial.plotting import survey_plot
-from survey.spatial.core import validate_spatial_mdata, validate_chipnums
+from survey.spatial.core import validate_spatial_mdata, validate_chipnums, ChipSet
+from survey.genutils import pklop
 
 
 ###
@@ -573,6 +575,93 @@ def apply_segmentation_results(mdata: md.MuData,
         
     # Join the new segmentation results
     chip.seg = chip.seg.join(selected_ids[group])
+
+
+def transfer_segmentation(mdata: md.MuData,
+                          path_to_saved_mdata: str,
+                          chipnums: Optional[List[int]] = None,
+                          groups: Optional[List[str]] = None) -> None:
+    """
+    Transfers segmentation data from a saved MuData file to the current one.
+
+    This function reads the ChipSet object from the sidecar pickle file of a
+    saved MuData object and copies specified segmentation groups to the
+    corresponding chips in the provided `mdata` object.
+
+    Parameters
+    ----------
+    mdata : md.MuData
+        The MuData object to transfer segmentation into.
+    path_to_saved_mdata : str
+        Path to the source `.h5mu` file from which to load segmentation.
+    chipnums : list of int, optional
+        A list of chip numbers to process. If None, all chips with segmentation
+        in the source file are considered.
+    groups : list of str, optional
+        A list of segmentation group names to transfer. If None, all groups
+        found on the source chips are transferred.
+
+    Returns
+    -------
+    None, modifies the `mdata` object in place.
+    """
+    # logger.info(f"Transferring segmentation from {path_to_saved_mdata}")
+
+    # 1. Validate the target mdata object
+    validate_spatial_mdata(mdata)
+    target_chipset = mdata['xyz'].uns['survey']
+
+    # 2. Load the ChipSet from the source pickle file
+    pickle_path = Path(path_to_saved_mdata).with_suffix('.pkl')
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Sidecar pickle file not found at {pickle_path}. "
+                                "Cannot transfer segmentation without it.")
+
+    saved_uns_data = pklop(pickle_path)
+
+    if 'xyz' not in saved_uns_data or 'survey' not in saved_uns_data['xyz']:
+        raise ValueError("Saved data pickle does not contain 'xyz' modality with a 'survey' ChipSet.")
+
+    source_chipset = saved_uns_data['xyz']['survey']
+    if not isinstance(source_chipset, ChipSet):
+        raise TypeError("The 'survey' object in the saved data is not a valid ChipSet.")
+
+    # 3. Determine which chips and groups to process
+    source_chip_keys = source_chipset.chips.keys()
+    chips_to_process = chipnums if chipnums is not None else source_chip_keys
+    
+    # 4. Iterate and transfer segmentation
+    for chip_num in chips_to_process:
+        if chip_num not in source_chip_keys:
+            warnings.warn(f"Chip {chip_num} not found in source file. Skipping.")
+            continue
+        if chip_num not in target_chipset.chips:
+            warnings.warn(f"Chip {chip_num} not found in target mdata. Skipping.")
+            continue
+
+        source_chip = source_chipset.chips[chip_num]
+        target_chip = target_chipset.chips[chip_num]
+        
+        source_groups = source_chip.seg.columns
+        groups_to_process = groups if groups is not None else source_groups
+
+        for group in groups_to_process:
+            if group not in source_groups:
+
+                warnings.warn(f"Group '{group}' not found for chip {chip_num} in source. Skipping.")
+                continue
+            
+            # Drop the column if it already exists in the target
+            if group in target_chip.seg.columns:
+                target_chip.seg.drop(columns=group, inplace=True)
+            
+            # Join the segmentation data
+            seg_to_add = source_chip.seg[[group]].dropna()
+            target_chip.seg = target_chip.seg.join(seg_to_add)
+
+            # Ensure the new column is categorical
+            if not isinstance(target_chip.seg[group], pd.CategoricalDtype):
+                target_chip.seg[group] = target_chip.seg[group].astype('category')
 
 
 # --- Public API Function ---

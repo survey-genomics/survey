@@ -1,7 +1,9 @@
 # Built-ins
 from pathlib import Path
 import re
-from typing import List, Union, Optional, Tuple, Sequence, Any, Dict, Callable
+from typing import (
+    List, Union, Optional, Tuple, Sequence, Any, Dict, Callable 
+)
 import warnings
 from inspect import signature, Parameter
 import pickle as pkl
@@ -636,3 +638,181 @@ def pklop(*args: Any) -> Optional[Any]:
         raise ValueError("Function accepts 1 argument (path) to load or 2 arguments (object, path) to save.")
     
     
+def normalize(arr: np.ndarray,
+              filter: Optional[Tuple[Optional[float], Optional[float]]] = None,
+              clip: Optional[Tuple[Optional[float], Optional[float]]] = None,
+              lower: Optional[float] = None,
+              upper: Optional[float] = None,) -> np.ndarray:
+    """
+    Filters, clips, and/or normalizes an array to a specified range.
+
+    The function applies operations in the following order:
+    1. **Filter**: Values outside the `filter` range are set to `np.nan`.
+    2. **Clip**: Values are clipped to the `clip` range.
+    3. **Normalize**: The resulting values are rescaled to a new target range
+       defined by `lower` and `upper`.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        The input NumPy array to normalize.
+    filter : tuple of (float or None, float or None), optional
+        A tuple `(min_filter, max_filter)` to filter the array. Values outside
+        this range will be replaced with `np.nan` before any other
+        operations. If a value is None, no filtering is performed on that side.
+    clip : tuple of (float or None, float or None), optional
+        A tuple `(min_clip, max_clip)` to clip the array values after
+        filtering but before normalization. If a value is None, no clipping is
+        performed on that side. If `clip` is `(None, None)`, a warning is
+        issued. Defaults to None (no clipping).
+    lower : float, optional
+        The lower bound of the target normalization range. Defaults to 0.0.
+    upper : float, optional
+        The upper bound of the target normalization range. Defaults to 1.0.
+
+    Returns
+    -------
+    np.ndarray
+        The filtered, clipped, and normalized NumPy array.
+
+    Raises
+    ------
+    ValueError
+        - If `filter` or `clip` is not a tuple of length 2.
+        - If an upper bound for `filter` or `clip` is not greater than its lower bound.
+        - If the final normalization range is invalid (e.g., upper < lower).
+
+    Warns
+    -----
+    UserWarning
+        - If `clip` is provided as `(None, None)`, as no clipping will occur.
+        - If `filter` is provided as `(None, None)`, as no filtering will occur.
+
+    Examples
+    --------
+    >>> data = np.array([-10, 0, 50, 100, 120])
+
+    # Filter out values < 0 and > 100, then normalize to [0, 1]
+    >>> normalize(data, filter=(0, 100))
+    array([ nan, 0. , 0.5, 1. ,  nan])
+
+    # Clip to [0, 100] then normalize to [0, 1]
+    >>> normalize(data, clip=(0, 100))
+    array([0.  , 0.  , 0.5 , 1.  , 1.  ])
+
+    # Clip and normalize to a new range using lower/upper
+    >>> normalize(data, clip=(0, 100), lower=10, upper=20)
+    array([10. , 10. , 15. , 20. , 20. ])
+    """
+
+    if arr.size == 0:
+        return arr.copy() # Return a copy of the empty array
+
+    # --- Input Parameter Validation ---
+    work_arr = arr.copy().astype(float) # Use float to accommodate np.nan
+
+    # --- Handle Filtering ---
+    if filter is not None:
+        if not isinstance(filter, tuple) or len(filter) != 2:
+            raise ValueError("`filter` must be a tuple of length 2, like (min, max).")
+        min_filter, max_filter = filter
+        if min_filter is not None and max_filter is not None and max_filter <= min_filter:
+            raise ValueError(f"In `filter`, max must be > min, but got min={min_filter}, max={max_filter}")
+        if min_filter is not None:
+            work_arr[work_arr < min_filter] = np.nan
+        if max_filter is not None:
+            work_arr[work_arr > max_filter] = np.nan
+
+    # --- Handle Clipping ---
+    if clip is not None:
+        if not isinstance(clip, tuple) or len(clip) != 2:
+            raise ValueError("`clip` must be a tuple of length 2, like (min, max).")
+        min_clip, max_clip = clip
+        if min_clip is not None and max_clip is not None and max_clip <= min_clip:
+            raise ValueError(f"In `clip`, max must be > min, but got min={min_clip}, max={max_clip}")
+        if min_clip is None and max_clip is None:
+            import warnings
+            warnings.warn("`clip` was set to (None, None). No clipping will be performed.")
+        work_arr = np.clip(work_arr, min_clip, max_clip)
+
+    # --- Determine Normalization Source Range (from filtered/clipped data) ---
+    min_val = np.nanmin(work_arr)
+    max_val = np.nanmax(work_arr)
+    range_val = max_val - min_val
+
+    # --- Determine Normalization Target Range ---
+    target_lower = lower if lower is not None else 0.0
+    target_upper = upper if upper is not None else 1.0
+    target_spread = target_upper - target_lower
+
+    if target_spread < 0:
+        raise ValueError(
+            f"Invalid target range: spread cannot be negative. "
+            f"Derived from lower={target_lower}, upper={target_upper}"
+        )
+
+    if range_val == 0:
+        # Calculate the midpoint of the target range
+        midpoint = target_lower + target_spread / 2.0
+        
+        out = np.full_like(work_arr, midpoint)
+        out[np.isnan(work_arr)] = np.nan
+        return out
+
+    # --- Perform Normalization ---
+    # Scale to [0, 1] first
+    normalized_arr = (work_arr - min_val) / range_val
+    
+    # Then scale to target range
+    return (normalized_arr * target_spread) + target_lower
+
+
+def get_functional_dependency(df: pd.DataFrame, 
+                              cols: Tuple[str, str]) -> Dict[Any, Any]:
+    """
+    Checks for a functional dependency and returns the mapping using a groupby approach.
+
+    A functional dependency exists if each unique value in the independent
+    column maps to exactly one unique value in the dependent column.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The input DataFrame.
+    cols : Tuple[str, str]
+        A 2-tuple of column names (independent_col, dependent_col). The
+        independent column provides the keys of the mapping, and the dependent
+        column provides the values.
+
+    Returns
+    -------
+    Dict[Any, Any]
+        A dictionary mapping unique values from `independent_col` to their
+        corresponding values in `dependent_col`.
+
+    Raises
+    ------
+    ValueError
+        If columns are not in the DataFrame or if a functional
+        dependency does not exist.
+    """
+    independent_col, dependent_col = cols
+    if independent_col not in df.columns or dependent_col not in df.columns:
+        raise ValueError("One or both columns not in DataFrame.")
+
+    # Group by the independent column and count unique dependent values
+    counts = df.groupby(independent_col, observed=True)[dependent_col].nunique()
+
+    # Check if any group has more than one unique dependent value
+    if (counts > 1).any():
+        offending_keys = counts[counts > 1].index.tolist()
+        raise ValueError(
+            f"No functional dependency from '{independent_col}' to '{dependent_col}'. "
+            f"Keys with multiple values: {offending_keys}"
+        )
+
+    # If dependency holds, create the mapping from the unique pairs
+    unique_pairs = df[[independent_col, dependent_col]].drop_duplicates()
+    mapping = pd.Series(unique_pairs[dependent_col].values, 
+                        index=unique_pairs[independent_col]).to_dict()
+    return mapping

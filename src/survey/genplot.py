@@ -11,10 +11,44 @@ from numbers import Number
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import seaborn as sns
 from PIL import Image
 
 # Survey libs
-from survey.genutils import make_logspace
+from survey.genutils import make_logspace, get_config
+
+inverted_rcparams = {
+    # Figure
+    "figure.facecolor": (0.0, 0.0, 0.0, 0.0),  # transparent figure background
+    "figure.edgecolor": "white",
+
+    # Axes
+    "axes.facecolor": (0.0, 0.0, 0.0, 0.0),  # transparent axes background
+    "axes.edgecolor": "white",
+    "axes.labelcolor": "white",
+    "axes.titlecolor": "white",
+
+    # Ticks
+    "xtick.color": "white",
+    "ytick.color": "white",
+
+    # Text
+    "text.color": "white",
+
+    # Grid
+    "grid.color": "gray",
+    "grid.alpha": 0.5,
+
+    # Legend
+    "legend.facecolor": (0.0, 0.0, 0.0, 0.0), # transparent legend background
+    "legend.edgecolor": "white",
+    "legend.labelcolor": "white",
+    
+    # Saving figures
+    "savefig.facecolor": (0.0, 0.0, 0.0, 0.0), # transparent background when saving
+    "savefig.edgecolor": (0.0, 0.0, 0.0, 0.0),
+    "savefig.transparent": True,
+}
 
 
 def loglog_hist(vals: np.ndarray,
@@ -403,4 +437,171 @@ def create_gif_from_pngs(png_dir: Union[str, Path],
         duration=duration,
         loop=loop
     )
+
+
+def id_axes(ax: mpl.axes.Axes, 
+            lim: tuple[float, float] | None = None, 
+            tix: list | None = None) -> mpl.axes.Axes:
+    """Make x and y axes identical.
+
+    Creates identical x and y axes with the same range, tick locations,
+    and tick labels, while ensuring all data remains visible.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The axes object to modify.
+    lim : tuple[float, float], optional
+        A 2-tuple of (min_limit, max_limit) to use for both axes. If None,
+        limits are computed from the existing axes limits to include all data.
+    tix : list, optional
+        A list of tick locations to apply to both axes. If None, the ticks
+        from the axis with more ticks are used.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The modified axes object.
+    """
+    if lim is None:
+        lim = min(min(ax.get_xlim()), min(ax.get_ylim())), max(max(ax.get_xlim()), max(ax.get_ylim()))
+
+    ax.set_xlim(lim)
+    ax.set_ylim(lim)
+
+    if tix is None:
+        tix = ax.get_xticks() if len(ax.get_xticks()) > len(ax.get_yticks()) else ax.get_yticks()
+    
+    tix = np.asarray(tix)
+    ax.set_xticks(ticks=tix)
+    ax.set_yticks(ticks=tix)
+
+    # Create integer labels for whole numbers, float labels otherwise
+    is_float = (tix % 1).astype(bool)
+    tix_labels = np.where(is_float, tix.astype(str), tix.astype(int).astype(str))
+    
+    ax.set_xticklabels(labels=tix_labels)
+    ax.set_yticklabels(labels=tix_labels)
+    
+    return ax
+
+
+def boxstrip(df, x, y, hue=None, ax=None, box_kws=None, strip_kws=None, common_kws=None):
+    """Create a boxplot overlaid with a stripplot.
+
+    This function uses seaborn to create a boxplot and a stripplot on the
+    same axes. It provides a convenient way to visualize the distribution
+    of a numerical variable across different categories.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The DataFrame containing the plotting data.
+    x : str
+        The name of the column in `df` to be used for the x-axis.
+    y : str
+        The name of the column in `df` to be used for the y-axis.
+    hue : str, optional
+        The name of the column in `df` for color encoding. Defaults to None.
+    ax : mpl.axes.Axes, optional
+        The matplotlib axes on which to draw the plot. If None, a new figure
+        and axes are created. Defaults to None.
+    box_kws : dict, optional
+        Keyword arguments to pass to `seaborn.boxplot`.
+    strip_kws : dict, optional
+        Keyword arguments to pass to `seaborn.stripplot`.
+    common_kws : dict, optional
+        Keyword arguments common to both plots. Will override
+        any conflicting keys in `box_kws` and `strip_kws`.
+
+    Returns
+    -------
+    mpl.axes.Axes
+        The matplotlib axes object containing the plot.
+    """
+
+    if ax is None:
+        fig, ax = subplots(1, ar=3, fss=6)
+    if hue == x:
+        dodge = False
+    else:
+        dodge = True
+
+    if box_kws is None:
+        box_kws = {}
+    if strip_kws is None:
+        strip_kws = {}
+
+    if common_kws:
+        box_kws.update(common_kws)
+        strip_kws.update(common_kws)
+    # print(box_kws)
+
+    default_box_kws = {'dodge': dodge, 'showfliers': False, 'saturation': 1.0}
+    default_strip_kws = {'dodge': dodge, 'size' : 5, 'jitter' : 0.1, 'linewidth': 0.5, 'legend': False}
+
+    box_kws = get_config(box_kws, default_box_kws)
+    strip_kws = get_config(strip_kws, default_strip_kws)
+
+    ax = sns.boxplot(data=df, x=x, y=y, hue=hue, ax=ax, **box_kws)
+    ax = sns.stripplot(data=df, x=x, y=y, hue=hue, ax=ax, **strip_kws)
+
+    return ax
+
+
+def set_tick_params(ax: mpl.axes.Axes, 
+                    **kwargs: Any) -> mpl.axes.Axes:
+    """Set tick parameters with added support for text alignment.
+
+    This function is a wrapper around `matplotlib.axes.Axes.tick_params`
+    that adds support for horizontal ('ha') and vertical ('va') alignment
+    of tick labels, which is not natively supported by `tick_params`.
+
+    Parameters
+    ----------
+    ax : mpl.axes.Axes
+        The matplotlib axes object to modify.
+    **kwargs : Any
+        Keyword arguments. These include standard `ax.tick_params` arguments
+        plus 'ha'/'horizontalalignment' and 'va'/'verticalalignment'.
+        The `axis` kwarg ('x', 'y', or 'both') determines which tick labels
+        are affected by alignment settings.
+
+    Returns
+    -------
+    mpl.axes.Axes
+        The modified matplotlib axes object.
+
+    Notes
+    -----
+    Alignment keywords ('ha', 'horizontalalignment', 'va', 'verticalalignment')
+    are extracted and applied separately using `ax.set_xticklabels` and
+    `ax.set_yticklabels`. The remaining keywords are passed directly to
+    `ax.tick_params`.
+    """
+    alignment_kws = {}
+    for key in ['ha', 'horizontalalignment']:
+        if key in kwargs:
+            alignment_kws['ha'] = kwargs.pop(key)
+    for key in ['va', 'verticalalignment']:
+        if key in kwargs:
+            alignment_kws['va'] = kwargs.pop(key)
+
+    ax.tick_params(**kwargs)
+
+    if alignment_kws:
+        axis = kwargs.get('axis', 'both')
+        if axis in ['x', 'both']:
+            # To prevent UserWarning about FixedLocator, we get and set ticks
+            ax.set_xticks(ax.get_xticks())
+            ax.set_xticklabels(ax.get_xticklabels(), **alignment_kws)
+        if axis in ['y', 'both']:
+            # To prevent UserWarning about FixedLocator, we get and set ticks
+            ax.set_yticks(ax.get_yticks())
+            ax.set_yticklabels(ax.get_yticklabels(), **alignment_kws)
+
+    return ax
+
+
+
 
