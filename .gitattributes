@@ -1,0 +1,2 @@
+# For ignoring HTML and Jupyter notebooks in the language graph
+notebooks/* linguist-vendored
