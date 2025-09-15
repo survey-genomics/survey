@@ -1,7 +1,7 @@
 # Built-ins
 import warnings
 import itertools as it
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Standard libs
 import numpy as np
@@ -230,8 +230,9 @@ def convert_to_categorical(obs_df: pd.DataFrame,
     obs_df[col] = obs_df[col].astype('category')
     return obs_df
 
-
-def get_color_mapper(cats: List[Any], cycle: bool = False) -> Dict[Any, str]:
+    
+def get_color_mapper(cats: List[Any], 
+                     cycle: bool = False) -> Dict[Any, str]:
     """
     Creates a mapping from categories to colors using scanpy's default palettes.
 
@@ -259,4 +260,41 @@ def get_color_mapper(cats: List[Any], cycle: bool = False) -> Dict[Any, str]:
     else:
         mapper = {cat: color for cat, color in zip(cats, it.cycle(sc.pl.palettes.default_102))}
     return mapper
+
+
+def freq_table(data: Union[sc.AnnData, pd.DataFrame],
+               cols: Tuple[Union[str, int], Union[str, int]],
+               observed: bool = True) -> pd.DataFrame:
+    '''
+    Create a frequency table for two categorical columns in an AnnData object.
+    Note that reported frequencies will not include any rows with NaN values in either 
+    column.
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing the observation data.
+    cols : tuple of str or int
+        A tuple containing the names or indices of the two columns to analyze.
+    observed : bool, optional
+        If True, only the observed categories in the data will be considered.
+        Passed to `groupby` method. Default is True.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame representing the frequency table, with one column as the index
+        and the other as columns.
+    '''
+    if not isinstance(cols, (list, tuple)) or len(cols) != 2:
+        raise ValueError("`cols` must be a list or tuple of exactly two elements.")
+    if not isinstance(data, (sc.AnnData, pd.DataFrame)):
+        raise ValueError("`data` must be an AnnData object or a DataFrame.")
+    if isinstance(data, pd.DataFrame):
+        df = data
+    else:
+        df = data.obs
+    c1, c2 = cols
+    return df[cols].groupby(cols, observed=observed).size().unstack(fill_value=0)
+
 
