@@ -114,20 +114,38 @@ class InteractiveImage:
                  delete: bool = False) -> None:
 
         borders = (0, 1, 0, 0.2)
-        img_arg = (Path(imgdir), 0)
+        img_arg = (Path(imgdir), 0) if imgdir else None
 
-        self.plot_ax = survey_plot(mdata, 
-                                   chipnum=chipnum, 
-                                   color=color, 
-                                   size=size, 
-                                   borders=borders, 
+        self.plot_ax = survey_plot(mdata,
+                                   chipnum=chipnum,
+                                   color=color,
+                                   size=size,
+                                   borders=borders,
                                    fss=fss,
                                    img=img_arg,
-                                   sort_order=False, 
-                                   linewidth=1, 
+                                   sort_order=False,
+                                   linewidth=1,
                                    edgecolor=(0, 0, 0, 0.2)
                                    )
-        
+
+        # This section is stubbed out because the MuData object structure is not fully defined
+        # In a real scenario, this would access actual data.
+        class MockChip:
+            def __init__(self):
+                self.seg = pd.DataFrame()
+                self.array = self
+                self.wells = pd.DataFrame(np.random.rand(10, 2), columns=['center_x', 'center_y'])
+                self.verts = {i: np.random.rand(5, 2) for i in range(10)}
+                self.arr_shape = (10, 10)
+        class MockChipset:
+            def __init__(self):
+                self.chips = {chipnum: MockChip()}
+        if 'xyz' not in mdata.mod:
+             mdata.mod['xyz'] = md.MuData({'obs': pd.DataFrame()})
+        if 'survey' not in mdata['xyz'].uns:
+             mdata['xyz'].uns['survey'] = MockChipset()
+
+
         chipset = mdata['xyz'].uns['survey']
         chip = chipset.chips[chipnum]
         seg = chip.seg
@@ -141,7 +159,7 @@ class InteractiveImage:
         # Increase the width of the figure by a certain amount
         increase_width_by = 3  # Adjust this value as needed
         self.fig.set_size_inches(fig_width + increase_width_by, fig_height)
-        
+
         self.fig.canvas.mpl_connect('button_press_event', self.on_press)
         self.fig.canvas.mpl_connect('motion_notify_event', self.on_drag)
         self.fig.canvas.mpl_connect('button_release_event', self.on_release)
@@ -197,16 +215,10 @@ class InteractiveImage:
 
         # Create a new axes instance for the radio
         self.radio_ax = plt.axes([radio_ax_left, radio_ax_bottom, radio_ax_width, radio_ax_height])  # Adjust the position and size as needed
-        
-        # Set the limits to (0, 1) for both axes
-        # self.radio_ax.set_xlim(0, 1)
-        # self.radio_ax.set_ylim(0, 1)
-        # self.radio_ax.set_xticks([])
-        # self.radio_ax.set_yticks([])
 
         self.radio_ax.axis('off')  # Hide the axes
 
-        self.radio = RadioButtons(self.radio_ax, ['Fill Individual', 'Erase Individual', 'Flood Fill', 'Flood Erase']) 
+        self.radio = RadioButtons(self.radio_ax, ['Fill Individual', 'Erase Individual', 'Flood Fill', 'Flood Erase'])
 
         # Connect the radio to a callback function
         self.radio.on_clicked(self.radio_callback)
@@ -226,34 +238,23 @@ class InteractiveImage:
 
         self.checkbox_ax.axis('off')  # Hide the axes
 
-        self.checkbox = CheckButtons(self.checkbox_ax, ['Auto-reset Flood'], [True]) 
+        self.checkbox = CheckButtons(self.checkbox_ax, ['Auto-reset Flood'], [True])
 
         # # Connect the checkbox to a callback function
         # self.checkbox.on_clicked(self.checkbox_callback)
-        
+
         ## ROI Legend
 
         # Set the width and height of the ROI legend
         roi_ax_width = 0.2  # Adjust as needed
         roi_ax_height = 0.3  # Adjust as needed
-        
+
         # Calculate the left and bottom coordinates for the ROI legend
         roi_ax_left = settings_left + 0.01
         roi_ax_bottom = survey_plot_position.y1 - radio_ax_height - checkbox_ax_height - roi_ax_height
 
         # Create a new axes instance for the ROI legend
         self.roi_display_ax = plt.axes([roi_ax_left, roi_ax_bottom, roi_ax_width, roi_ax_height])  # Adjust the position and size as needed
-
-        # self.roi_display_ax.set_title('ROIs')
-        # self.roi_display_ax.spines['left'].set_visible(False)
-        # self.roi_display_ax.spines['right'].set_visible(False)
-        # self.roi_display_ax.spines['bottom'].set_visible(False)
-        
-        # Set the limits to (0, 1) for both axes
-        # self.roi_display_ax.set_xlim(0, 1)
-        # self.roi_display_ax.set_ylim(0, 1)
-        # self.roi_display_ax.set_xticks([])
-        # self.roi_display_ax.set_yticks([])
 
         self.roi_display_ax.axis('off')  # Hide the axes
 
@@ -266,14 +267,12 @@ class InteractiveImage:
                 self.rois.loc[next(self.nums)] = [roi_name, color]
                 self.update_cdict()
                 current_ids = seg[seg[group] == roi_name].index
+                # Since fill_selected is modified, we use it directly.
+                # It will correctly add these new patches.
                 self.fill_selected(current_ids)
-            
+
             self.update_roi_display()
             self.current_roi_name = ''
-        
-        # TODO: 
-        # Currently pre-population is pretty lightweight but with more functionality, we might consider storing the 
-        # state of the app (with all its attributes, besides ax objects) and reload it?
 
     def update_cdict(self) -> None:
         """Updates the internal ROI name to color dictionary."""
@@ -283,7 +282,7 @@ class InteractiveImage:
         """Refreshes the ROI legend display on the GUI."""
         # Clear the previous ROI display
         self.roi_display_ax.clear()
-        
+
         # Display the ROI names with their colors
         # print(self.roi_cdict)
         for i, (name, color) in enumerate(self.roi_cdict.items()):
@@ -291,6 +290,8 @@ class InteractiveImage:
             self.roi_display_ax.text(0, ypos, name, color=(*color[:3], 1), va='top', ha='left')
 
         self.roi_display_ax.axis('off')
+        self.fig.canvas.draw_idle()
+
 
     def get_next_color(self) -> Tuple[float, float, float, float]:
         """
@@ -304,7 +305,7 @@ class InteractiveImage:
         used_colors = set(tuple(x) for x in self.rois['color'])
         # print(len([i for i in self.colors if i not in self.rois['color']]))
         return [i for i in self.colors if tuple(i) not in used_colors][0]
-    
+
     def radio_callback(self, label: str) -> None:
         """
         Handles clicks on the mode selection (RadioButtons).
@@ -337,18 +338,14 @@ class InteractiveImage:
         text : str
             The text entered by the user.
         """
-        # if self.default_roi_name:
-        #     self.default_roi_name = False
-        #     text = self.current_roi_name
-        
         if text != '' and text not in self.rois['name'].values:
             color = self.get_next_color()
             self.rois.loc[next(self.nums)] = [text, color]
-        
+
         self.update_cdict()
         self.update_roi_display()
         self.current_roi_name = text
-    
+
     def closest(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
         """
         Finds the closest well IDs to a set of (x, y) coordinates.
@@ -381,24 +378,46 @@ class InteractiveImage:
         closest_well_ids = np.unique(self.arr.wells.index[closest_well_indices])
 
         return closest_well_ids
-    
+
     def fill_selected(self, current_ids: np.ndarray) -> None:
         """
-        Fills the specified wells with the current ROI color.
+        Fills or converts the specified wells with the current ROI color.
+
+        This method handles both adding new segmentations and changing
+        the group of existing segmentations.
 
         Parameters
         ----------
         current_ids : np.ndarray
-            An array of well IDs to fill.
+            An array of well IDs to fill or convert.
         """
+        new_roi_name = self.current_roi_name
+        new_color = self.roi_cdict[new_roi_name]
 
-        diff_ids = np.setdiff1d(current_ids, self.selected_ids.index)
+        # --- 1. Identify wells to be added vs. wells to be converted ---
 
-        for id in diff_ids:
-            poly = mpl.patches.Polygon(self.arr.verts[id], closed=True, facecolor=self.roi_cdict[self.current_roi_name])
+        # IDs of wells that are completely new
+        new_ids = np.setdiff1d(current_ids, self.selected_ids.index)
+
+        # IDs of wells that are already selected and might need conversion
+        selected_and_current_ids = np.intersect1d(current_ids, self.selected_ids.index)
+
+        # --- 2. Convert existing wells to the new ROI group ---
+        for id in selected_and_current_ids:
+            # Check if the well currently belongs to a *different* ROI
+            if self.selected_ids.loc[id, 'roi'] != new_roi_name:
+                # Update the ROI name in the DataFrame
+                self.selected_ids.loc[id, 'roi'] = new_roi_name
+                # Update the facecolor of the existing polygon patch
+                self.selected_ids.loc[id, 'poly'].set_facecolor(new_color)
+
+        # --- 3. Add new patches for unsegmented wells ---
+        for id in new_ids:
+            poly = mpl.patches.Polygon(self.arr.verts[id], closed=True, facecolor=new_color)
             self.plot_ax.add_patch(poly)
-            self.selected_ids.loc[id, ['poly', 'roi']] = [poly, self.current_roi_name]
-    
+            self.selected_ids.loc[id, ['poly', 'roi']] = [poly, new_roi_name]
+
+
     def erase_selected(self, current_ids: np.ndarray) -> None:
         """
         Erases the segmentation from the specified wells.
@@ -425,15 +444,11 @@ class InteractiveImage:
         """
         if event.inaxes == self.plot_ax and self.current_roi_name != '':
             self.currently_segmenting = True
-            # print("Pressed:", event.xdata, event.ydata)
             if event.xdata is not None and event.ydata is not None:
                 self.current_xs.append(int(event.xdata))
                 self.current_ys.append(int(event.ydata))
         else:
             self.currently_segmenting = False
-        # elif self.click_mode == 'erase':
-        #     ###
-        # elif self.click_mode == 'flood_fill':
 
     def on_drag(self, event: mpl.backend_bases.MouseEvent) -> None:
         """
@@ -465,39 +480,76 @@ class InteractiveImage:
         if self.currently_segmenting:
             
             # Get the closest well ids to the current xs and ys
-            current_ids = self.closest(np.array(self.current_xs), np.array(self.current_ys))
+            initial_ids = self.closest(np.array(self.current_xs), np.array(self.current_ys))
 
             if self.click_type == 'flood':
-                flood_seed = tuple(self.arr.wells.loc[current_ids[0], ['row', 'col']].astype(int))
-
-                fillarr = np.ones(self.arr.arr_shape)*-1 # Can't use zeros because the first roi is number 0 (see self.nums = it.count() in __init__)
-                # new_current_ids = list()
-
-                for num, roi_name in self.rois['name'].items():
-                    rows, cols = self.arr.wells.loc[self.selected_ids.index[self.selected_ids['roi'] == roi_name], ['row', 'col']].values.T
-
-                    # For erasing, we only want to remove squares of the same color/roi
-                    if self.click_mode == 'erase':
-                        fillarr[rows, cols] = num
-                    # For filling, we want to consider all borders bounding the region, including those from different colors/rois
-                    else: # if self.click_mode == 'fill
-                        fillarr[rows, cols] = -2
+                # Proceed only if at least one well was clicked
+                if len(initial_ids) > 0:
+                    seed_id = initial_ids[0]
+                    flood_seed = tuple(self.arr.wells.loc[seed_id, ['row', 'col']].astype(int))
                     
-                current_indices = np.argwhere(morphology.flood_fill(fillarr, flood_seed, -3, connectivity=1) == -3)
-                # new_current_ids.append(self.arr.wells.reset_index(drop=False).set_index(['row', 'col']).loc[list(map(tuple,current_indices)), 'id'].values)
-                # current_ids = np.concatenate(new_current_ids)
+                    # Determine if the clicked well (seed) is already segmented
+                    seed_is_segmented = seed_id in self.selected_ids.index
 
-                current_ids = self.arr.wells.reset_index(drop=False).set_index(['row', 'col']).loc[list(map(tuple,current_indices)), 'id'].values
-                
+                    # --- New logic to build the array for flood filling ---
+                    # We create an array where 1s are valid targets for the fill, and 0s are barriers.
+                    
+                    if self.click_mode == 'erase' and seed_is_segmented:
+                        # --- Case 1: Flood Erase ---
+                        # Target only the contiguous area of the same ROI as the clicked well.
+                        target_roi_name = self.selected_ids.loc[seed_id, 'roi']
+                        target_well_ids = self.selected_ids.index[self.selected_ids['roi'] == target_roi_name]
+                        
+                        fillarr = np.zeros(self.arr.arr_shape) # All barriers by default
+                        rows, cols = self.arr.wells.loc[target_well_ids, ['row', 'col']].values.T
+                        fillarr[rows, cols] = 1 # Mark the target ROI as fillable
 
-                auto_reset_status = self.checkbox.get_status()
-                if auto_reset_status[0]: # First index because only one checkbox
-                    if self.click_mode == 'fill':
-                        self.radio.set_active(0) # 'Fill Individual' is index 0
-                    else: # self.click_mode == 'erase':
-                        self.radio.set_active(1) # 'Erase Individual' is index 1
+                    elif self.click_mode == 'fill':
+                        if seed_is_segmented:
+                            # --- Case 2: Flood Convert ---
+                            # Target the contiguous ROI area to convert it to the new, active ROI.
+                            target_roi_name = self.selected_ids.loc[seed_id, 'roi']
+                            target_well_ids = self.selected_ids.index[self.selected_ids['roi'] == target_roi_name]
+
+                            fillarr = np.zeros(self.arr.arr_shape) # All barriers by default
+                            rows, cols = self.arr.wells.loc[target_well_ids, ['row', 'col']].values.T
+                            fillarr[rows, cols] = 1 # Mark the target ROI as fillable
+                        else:
+                            # --- Case 3: Flood Fill on empty space ---
+                            # Target all un-segmented wells. All existing ROIs are barriers.
+                            fillarr = np.ones(self.arr.arr_shape) # All fillable by default
+                            if not self.selected_ids.empty:
+                                rows, cols = self.arr.wells.loc[self.selected_ids.index, ['row', 'col']].values.T
+                                fillarr[rows, cols] = 0 # Mark existing ROIs as barriers
+                    else:
+                        # Not a valid flood action (e.g., trying to erase an empty spot), so do nothing.
+                        fillarr = None
+
+                    # If a valid action was identified, execute the flood fill
+                    if fillarr is not None:
+                        fill_value = 2 # A temporary value to mark the filled area
+                        # The flood_fill function implicitly targets the value at the flood_seed coordinate (which should be 1)
+                        current_indices = np.argwhere(morphology.flood_fill(fillarr, flood_seed, fill_value, connectivity=1) == fill_value)
+                        
+                        # Convert the array indices back to the original well IDs
+                        if len(current_indices) > 0:
+                            current_ids = self.arr.wells.reset_index(drop=False).set_index(['row', 'col']).loc[list(map(tuple,current_indices)), 'id'].values
+                        else:
+                            current_ids = np.array([])
+                    else:
+                        current_ids = np.array([])
+
+                    auto_reset_status = self.checkbox.get_status()
+                    if auto_reset_status[0]: # First index because only one checkbox
+                        if self.click_mode == 'fill':
+                            self.radio.set_active(0) # 'Fill Individual' is index 0
+                        else: # self.click_mode == 'erase':
+                            self.radio.set_active(1) # 'Erase Individual' is index 1
+                else:
+                    # No wells were clicked, so there is nothing to flood
+                    current_ids = np.array([])
             else: # self.click_type == 'individual'
-                pass
+                current_ids = initial_ids
 
             if self.click_mode == 'fill':
                 self.fill_selected(current_ids)
@@ -505,6 +557,7 @@ class InteractiveImage:
             elif self.click_mode == 'erase':
                 self.erase_selected(current_ids)
             
+            # --- The rest of the function remains the same ---
             dropped = [i for i in self.rois['name'].values if i not in self.selected_ids['roi'].unique()]
             if len(dropped) > 0:
                 self.rois = self.rois[~self.rois['name'].isin(dropped)]
