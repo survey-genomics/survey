@@ -294,6 +294,11 @@ def freq_table(data: Union[sc.AnnData, pd.DataFrame],
         df = data
     else:
         df = data.obs
+
+    if any([col not in df.columns for col in cols]):
+        raise ValueError("Not all specified columns are present in the DataFrame.")
+    if len(cols) != 2:
+        raise ValueError("`cols` must contain exactly two column names or indices.")
     c1, c2 = cols
     return df[cols].groupby(cols, observed=observed).size().unstack(fill_value=0)
 
