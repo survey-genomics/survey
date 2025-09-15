@@ -260,7 +260,9 @@ def get_adj(arr: np.ndarray, max_dist: int) -> np.ndarray:
     return adj
 
 
-def distribute_by_proportions(v: np.ndarray, p: np.ndarray) -> List[np.ndarray]:
+def distribute_by_proportions(v: np.ndarray, 
+                              p: np.ndarray,
+                              seed: int=0) -> List[np.ndarray]:
     """
     Randomly distributes values from an array into subarrays based on proportions.
 
@@ -270,12 +272,18 @@ def distribute_by_proportions(v: np.ndarray, p: np.ndarray) -> List[np.ndarray]:
         1D array of values to distribute.
     p : np.ndarray
         1D array of proportions, which will be normalized to sum to 1.
+    seed : int, optional
+        Random seed for reproducibility.
 
     Returns
     -------
     list of np.ndarray
         A list of subarrays containing the distributed values.
     """
+    
+    rng = np.random.default_rng(seed)
+
+
     v = np.array(v)
     p = np.array(p)
     
@@ -301,7 +309,7 @@ def distribute_by_proportions(v: np.ndarray, p: np.ndarray) -> List[np.ndarray]:
         sizes[indices] -= 1
     
     # Shuffle the values randomly
-    shuffled_v = np.random.permutation(v)
+    shuffled_v = rng.permutation(v)
     
     # Split into subarrays
     result = []
@@ -380,7 +388,6 @@ def convert_names(vars: Union[str, List[str]],
             return converted
     else:
         return dict(zip(vars, converted))
-
 
 
 class SpatialNormalizer:
@@ -980,7 +987,9 @@ class SpatialCaller:
             return sorted
 
 
-        def get_topstats(sorted, top_bcs, snr_comps):
+        def get_topstats(sorted, top_bcs, snr_comps, seed=0):
+
+            rng = np.random.default_rng(seed)
 
             topstats = {spidx: {} for spidx in self.spmods}
 
@@ -991,7 +1000,7 @@ class SpatialCaller:
                 tags = pd.DataFrame(data=[x[0] for x in topstats_s], index=topstats_s.index)
                 tags = tags.map(lambda x: [] if x is None else x)
 
-                topstats[spidx]['tags'] = tags.map(lambda x: x if len(x) == 1 else np.random.permutation(x))
+                topstats[spidx]['tags'] = tags.map(lambda x: x if len(x) == 1 else rng.permutation(x))
                 # topstats[spidx]['tags'] = tags.map(lambda x: x if len(x) == 1 else ['Tie'])
 
                 topstats[spidx]['counts'] = pd.DataFrame(data=[x[1] for x in topstats_s], index=topstats_s.index)
@@ -1507,7 +1516,7 @@ class SpatialPositioner:
         self.position.meta = meta
 
 
-    def add_coords(self, method='m01', **kwargs):
+    def add_coords(self, method='m01', seed=0, **kwargs):
 
         def _get_ranges(id):
             verts = self.chip.array.verts[id]
@@ -1532,7 +1541,7 @@ class SpatialPositioner:
                     "Positioning within non-rectangular polygon not implemented yet."
                 )
             else:
-                centers = zip(*[np.random.uniform(*r, size=count) for r in (xrange, yrange)])
+                centers = zip(*[rng.uniform(*r, size=count) for r in (xrange, yrange)])
 
             # print((id, centers.shape))
 
@@ -1555,10 +1564,12 @@ class SpatialPositioner:
             y_params = (range_center[1], yrange_diff * scale_norm)
             
             # Generate centers
-            centers = zip(*[np.random.normal(*params, size=count) for params in (x_params, y_params)])
+            centers = zip(*[rng.normal(*params, size=count) for params in (x_params, y_params)])
 
             for center in centers:
                 yield center
+
+        rng = np.random.default_rng(seed)
 
         possible_methods = ['m01', 'm02']
         if method not in possible_methods:
