@@ -17,6 +17,7 @@ import mudata as md
 # Survey libs
 from survey.genutils import is_listlike, get_config
 from survey.genplot import subplots
+from survey.singlecell.scutils import freq_table, get_color_mapper
 from survey.singlecell.datatypes import determine_data
 from survey.singlecell.obs import get_obs_df
 from survey.singlecell.meta import get_cat_dict
@@ -779,3 +780,168 @@ def plot_features(data: Union[sc.AnnData, md.MuData],
         raise ValueError('Features must be a dict or list-like')
     return figs_axes
 
+
+def freq_chart(data: Union[sc.AnnData, pd.DataFrame],
+               group: Optional[str] = None,
+               x: Optional[str] = None,
+               prop: bool = True,
+               filterrows: Optional[List[str]] = None,
+               x_font_size: int = 10,
+               return_df: bool = True,
+               order_by: Optional[Union[str, List[str]]] = None,
+               add_label: bool = False,
+               label_thresh: float = 0.02,
+               label_size: int = 10,
+               legend: bool = True,
+               cdict: Optional[Dict[str, str]] = None,
+               fss: Optional[float] = None,
+               ar: Optional[float] = None,
+               ax: Optional[plt.Axes] = None):
+    """Plot a column chart of covariate coincidences.
+
+    This function creates a stacked column chart to visualize the proportional
+    or absolute coincidence of two categorical covariates from single-cell data.
+
+    Parameters
+    ----------
+    data : sc.AnnData or pd.DataFrame
+        The input data. If a DataFrame, it should contain the columns
+        specified by `group` and `x`.
+    group : str, optional
+        The column in `adata.obs` or `data` to be plotted on the y-axis
+        (proportions or counts).
+    x : str, optional
+        The column in `adata.obs` or `data` to be plotted on the x-axis.
+    prop : bool, default: True
+        If True, plot proportions. If False, plot absolute numbers.
+    filterrows : Optional[List[str]], optional
+        A list of values from the `x` column to include in the plot.
+    x_font_size : int, default: 10
+        Font size for the x-axis tick labels.
+    return_df : bool, default: True
+        If True, return the calculated DataFrame along with the Axes object(s).
+    order_by : Optional[Union[str, List[str]]], optional
+        Order the columns of the chart by the decreasing proportion of a
+        level or levels in `group`. If a list, multiple charts will be plotted.
+    add_label : bool, default: False
+        If True, add a numerical label to each section of the bars.
+    label_thresh : float, default: 0.02
+        Do not label bar sections smaller than this threshold.
+    label_size : int, default: 10
+        Font size for the bar labels.
+    legend : bool, default: True
+        If True, display a legend.
+    cdict : Optional[Dict[str, str]], optional
+        A dictionary mapping group categories to colors. If not provided,
+        colors will be automatically assigned.
+    fss : Optional[float], optional
+        Figure size scaler for the plot.
+    ar : Optional[float], optional
+        Aspect ratio of the plot.
+    ax : Optional[plt.Axes], optional
+        An existing Axes object to plot on.
+
+    Returns
+    -------
+    Union[plt.Axes, List[plt.Axes]]
+        The matplotlib Axes object or a list of Axes objects if `order_by`
+        is a list.
+    pd.DataFrame
+        The DataFrame used for plotting. Only returned if `return_df` is True.
+    """
+    
+    def _plotter(df_gb, ax=None):
+        if ax is None:
+            fig, ax = subplots(1, fss=fss, ar=ar)
+        lastpos = [0]*len(df_gb.index)
+
+        try:
+            for g, c in cdict.items():
+                ax.bar(df_gb.index, df_gb[g].values, label=str(g), bottom=lastpos, color=c)
+                if add_label:
+                    for idx, y, lp in zip(df_gb.index, df_gb[g].values, lastpos):
+                        label = '{:03.1f}'.format((y)*100) if prop else str(y)
+                        if y < label_thresh:
+                            continue
+                        else:
+                            ax.text(idx, lp + y/2, s=label, ha='center', va='center', size=label_size)
+                lastpos = df_gb[g].values + lastpos
+        except (KeyError, TypeError): # TypeError if cdict is None
+            for g in df_gb.columns:
+                ax.bar(df_gb.index, df_gb[g].values, label=str(g), bottom=lastpos)
+                if add_label:
+                    for idx, y, lp in zip(df_gb.index, df_gb[g].values, lastpos):
+                        label = '{:03.1f}'.format((y)*100) if prop else str(y)
+                        if y < label_thresh:
+                            continue
+                        else:
+                            ax.text(idx, lp + y/2, s=label, ha='center', va='center', size=label_size)
+                lastpos = df_gb[g].values + lastpos
+        if prop:
+            ax.set_ylabel('Proportion')
+        else:
+            ax.set_ylabel('Absolute number')
+        ax.grid(False)
+        ax.set_xticks(df_gb.index)
+        ax.set_xticklabels(df_gb.index, rotation=45, size=x_font_size, ha='right')
+        if legend:
+            ax.legend(bbox_to_anchor=(1.02, 1), loc=2, borderaxespad=0)
+        return ax
+    
+    def _get_cats(df, group):
+        if isinstance(df[group], pd.CategoricalDtype):
+            return df[group].cat.categories
+        else:
+            return df[group].unique()
+
+    if not isinstance(data, (sc.AnnData, pd.DataFrame)):
+        raise ValueError("`data` must be an AnnData object or a DataFrame.")
+    
+    cols = [x, group]
+    
+    if isinstance(data, pd.DataFrame):
+        df = data[cols].copy()
+        cats = _get_cats(df, group)
+
+        if cdict is None:
+            cdict = get_color_mapper(cats)
+        else:
+            if any([cat not in cdict for cat in cats]):
+                raise ValueError("Not all categories in `group` are present in `cdict`.")
+    elif isinstance(data, sc.AnnData):
+        df = data.obs[cols].copy()
+        cats = _get_cats(df, group)
+        if cdict is None:
+            cdict = get_cat_dict(data, group, 'color')
+        else:
+            if any([cat not in cdict for cat in cats]):
+                raise ValueError("Not all categories in `group` are present in `cdict`.")
+
+
+    df_gb = freq_table(df, cols, observed=True)
+
+    if prop:
+        df_gb = df_gb.div(df_gb.sum(1), axis=0)
+
+    df_gb.columns = df_gb.columns.astype(str) # sometimes they're coerced into numerical which causes problems
+    df_gb.index = df_gb.index.astype(str) # sometimes they're coerced into numerical which causes problems
+
+    if filterrows is not None:
+        df_gb = df_gb.loc[filterrows]
+    
+    if order_by is None:
+        axes = _plotter(df_gb, ax=ax)
+    elif isinstance(order_by, str):
+        axes = _plotter(df_gb.sort_values(by=order_by, ascending=False), ax=ax)
+    elif isinstance(order_by, (list, np.ndarray, tuple)):
+        axes = list()
+        for ob in order_by:
+            axes.append(_plotter(df_gb.sort_values(by=ob, ascending=False))) # ax cannot be passed here
+    else:
+        raise ValueError("Param `order_by` not understood or not a `group` category.")
+
+    if return_df:
+        return axes, df_gb
+    else:
+        return axes
+    
