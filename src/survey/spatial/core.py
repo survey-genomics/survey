@@ -5,7 +5,7 @@ from typing import (
 )
 import warnings
 import itertools as it
-from numbers import Number
+from numbers import Number, Integral
 from collections import deque
 from pathlib import Path
 from functools import reduce
@@ -1409,7 +1409,7 @@ def validate_chipnums(chipset: ChipSet,
     else:
         chipnums = chipnum
 
-    if not all(isinstance(i, int) for i in chipnums):
+    if not all(isinstance(i, Integral) for i in chipnums):
         raise ValueError("Param `chipnum` must be integer or list-like of integers.")
 
     chips_not_found = set(chipnums).difference(set(chipset.chips.keys()))
