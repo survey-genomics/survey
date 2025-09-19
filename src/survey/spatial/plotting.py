@@ -337,11 +337,10 @@ def arrplot(mdata: md.MuData,
                 wells = wells.loc[wells_show]
 
             if dtypes['color']['type'] == 'num':
-                if norm is not None:
-                    wells_norm = wells.apply(norm)
-                    well_colors = wells_norm.apply(cmap)
-                else:
-                    well_colors = wells.apply(cmap)
+                if norm is None:
+                    norm = mpl.colors.Normalize(vmin=wells.min(), vmax=wells.max())
+                well_colors = wells.apply(lambda x: cmap(norm(x)))
+
             elif pd.Series(wells).apply(mpl.colors.is_color_like).all():
                 well_colors = wells
             else:
