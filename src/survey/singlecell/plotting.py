@@ -24,6 +24,100 @@ from survey.singlecell.meta import get_cat_dict
 from survey.singlecell.decorate import decorate_scatter, get_pm
 
 
+def get_plotting_configs(plot_type: str,
+                         plot_label_params: Optional[Dict[str, Any]] = None,
+                         cbar_params: Optional[Dict[str, Any]] = None,
+                         legend_params: Optional[Dict[str, Any]] = None,
+                         label_scatter_params: Optional[Dict[str, Any]] = None,
+
+                         **kwargs) -> Dict[str, Dict[str, Any]]:
+    """
+    Generates plotting configurations based on the plot type and parameters.
+    This function prepares configuration dictionaries for different plot types,
+    ensuring that the necessary parameters are provided and valid.
+
+    Parameters
+    ----------
+    plot_type : str
+        The type of plot to configure. Must be either 'scatter' or 'labeled_scatter'.
+    plot_label_params : dict, optional
+        Parameters for customizing the plot label (used in 'scatter' plots).
+    cbar_params : dict, optional
+        Parameters for customizing the colorbar (used in 'scatter' plots).
+    legend_params : dict, optional
+        Parameters for customizing the legend (used in both plot types).
+    label_scatter_params : dict, optional
+        Parameters for customizing the labeled scatter (used in 'labeled_scatter' plots).
+    **kwargs
+        Additional keyword arguments specific to the plot type:
+        - For 'scatter': 'invert' (bool) to set background color.
+        - For 'labeled_scatter': 'match_color' (bool) and 'label_contrast' (bool or None).
+
+    Returns
+    -------
+    configs : dict
+        A dictionary containing configuration dictionaries for the specified plot type.
+
+    Raises
+    ------
+    ValueError
+        If required parameters for the specified plot type are missing or if
+        the plot type is not recognized.
+    """
+
+    def _check_kwargs(plot_type, possible_kwargs, kwargs):
+
+        if not possible_kwargs == set(kwargs.keys()):
+            raise ValueError(f"For input plot_type '{plot_type}', additional keywords are required: {possible_kwargs}")
+
+
+    if plot_type == 'scatter':
+
+        possible_kwargs = {'invert'}
+        _check_kwargs(plot_type, possible_kwargs, kwargs)
+
+        plot_label_params = (plot_label_params or {}).copy()
+        cbar_params = (cbar_params or {}).copy()
+        legend_params = (legend_params or {}).copy()
+
+        for decorate_params, name in zip((cbar_params, plot_label_params), ('cbar', 'plot_label')):
+            if 'invert' in decorate_params:
+                warnings.warn(f"The 'invert' parameter in {name}_params is ignored. Use the top-level 'invert' parameter instead.")
+            decorate_params.update({'invert': kwargs['invert']})
+            
+        user_params = {'plot_label': plot_label_params, 'cbar': cbar_params, 'legend': legend_params}
+        configs = {plot_type: get_pm(plot_type).get_params(user_params[plot_type]) for plot_type in user_params}
+
+    elif plot_type == 'labeled_scatter':
+
+        possible_kwargs = {'match_color', 'label_contrast'}
+        _check_kwargs(plot_type, possible_kwargs, kwargs)
+
+        legend_params = (legend_params or {}).copy()
+        label_scatter_params = (label_scatter_params or {}).copy()
+
+        if not kwargs['match_color'] and kwargs['label_contrast']:
+            warnings.warn(
+                "Parameter 'label_contrast' can only be set to True if 'match_color' is also True. "
+                "Setting 'label_contrast' to False."
+            )
+            kwargs['label_contrast'] = False
+
+        if kwargs['match_color'] and kwargs['label_contrast'] is None:
+            kwargs['label_contrast'] = True
+        label_scatter_params.update({
+            'match_color': kwargs['match_color'],
+            'label_contrast': kwargs['label_contrast'],
+        })
+        user_params = {'legend': legend_params, 'label_scatter': label_scatter_params}
+        configs = {plot_type: get_pm(plot_type).get_params(user_params[plot_type]) for plot_type in user_params}
+
+    else:
+        raise ValueError(f"Plot type '{plot_type}' not recognized. Must be 'scatter' or 'labeled_scatter'.")
+
+    return configs
+
+
 def get_plot_data(data: Union[sc.AnnData, md.MuData],
                   mod: Optional[str] = None,
                   color: Optional[str] = None,
@@ -280,7 +374,7 @@ def scatter(data: Union[sc.AnnData, md.MuData],
     def _run_scatter(ax, X, c, basis, s, lims, **kwargs):
         # Create a scatter plot
         if ax is None:
-            fig, ax = plt.subplots()
+            fig, ax = subplots(1, fss=8, ar=1)
 
         # Plot data
         scpc = ax.scatter(X[:, 0], X[:, 1], c=c, s=s, **kwargs)
@@ -303,16 +397,13 @@ def scatter(data: Union[sc.AnnData, md.MuData],
 
         return fig, ax, scpc
     
-    # Get ParamManagers
-    plot_label_params = (plot_label_params or {}).copy()
-    cbar_params = (cbar_params or {}).copy()
-    legend_params = (legend_params or {}).copy()
-
-    plot_label_params.update({'invert': invert})
-    cbar_params.update({'invert': invert})
-    user_params = {'plot_label': plot_label_params, 'cbar': cbar_params, 'legend': legend_params}
-
-    configs = {plot_type: get_pm(plot_type).get_params(user_params[plot_type]) for plot_type in user_params}
+    configs = get_plotting_configs(
+        plot_type='scatter',
+        plot_label_params=plot_label_params,
+        cbar_params=cbar_params,
+        legend_params=legend_params,
+        invert=invert
+    )
 
     if plot_data is not None: # in case its already been computed
         if not isinstance(plot_data, tuple) or len(plot_data) != 3:
@@ -330,7 +421,6 @@ def scatter(data: Union[sc.AnnData, md.MuData],
     s = plot_df['s'].values
 
     fig, ax, scpc = _run_scatter(ax, X, c, basis, s, lims, **kwargs)
-
     
     # Decorate the scatter plot
 
@@ -449,24 +539,15 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
 
     if color_type != 'cat':
         raise ValueError("labeled_scatter only works with categorical color.")
-
-    # Get ParamManagers, update with the kwargs
-    legend_params = legend_params or {}
-    label_scatter_params = label_scatter_params or {}
-    if not match_color and label_contrast:
-        warnings.warn(
-            "Parameter 'label_contrast' can only be set to True if 'match_color' is also True. "
-            "Setting 'label_contrast' to False."
-        )
-        label_contrast = False
-    if match_color and label_contrast is None:
-        label_contrast = True
-    label_scatter_params.update({
-        'match_color': match_color,
-        'label_contrast': label_contrast,
-    })
-    user_params = {'legend': legend_params, 'label_scatter': label_scatter_params}
-    configs = {plot_type: get_pm(plot_type).get_params(user_params[plot_type]) for plot_type in user_params}
+    
+    # Get plotting configs
+    configs = get_plotting_configs(
+        plot_type='labeled_scatter',
+        legend_params=legend_params,
+        label_scatter_params=label_scatter_params,
+        match_color=match_color,
+        label_contrast=label_contrast
+    )
 
     # Validate other inputs
     ## Confirm no legend is requested from scatter,
@@ -482,10 +563,9 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
     
     # Plot the underlying scatter
     if ax is None:
-        fig, ax = subplots(1, fss=10, ar=1)
+        fig, ax = subplots(1, fss=8, ar=1)
 
     ax = scatter(adata, color=color, size=size, ax=ax, basis=basis, **scatter_config)
-
 
     # Get color dict and centroids
     if match_color is True:

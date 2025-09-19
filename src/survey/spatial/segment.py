@@ -20,9 +20,10 @@ import mudata as md
 
 # Survey libs
 from survey.singlecell.io import read_data, write_data
-from survey.spatial.plotting import survey_plot
+from survey.spatial.plotting import arrplot, cellmap
 from survey.spatial.core import validate_spatial_mdata, validate_chipnums, ChipSet
 from survey.genutils import pklop
+from survey.genplot import subplots
 
 
 ###
@@ -115,18 +116,24 @@ class InteractiveImage:
 
         borders = (0, 1, 0, 0.2)
         img_arg = (Path(imgdir), 0) if imgdir else None
-
-        self.plot_ax = survey_plot(mdata,
-                                   chipnum=chipnum,
-                                   color=color,
-                                   size=size,
-                                   borders=borders,
-                                   fss=fss,
-                                   img=img_arg,
-                                   sort_order=False,
-                                   linewidth=1,
-                                   edgecolor=(0, 0, 0, 0.2)
-                                   )
+        
+        self.plot_ax = arrplot(mdata,
+                               chipnum=chipnum,
+                               color=color,
+                               img=img_arg,
+                               borders=borders,
+                               fss=fss
+                               )
+        
+        self.plot_ax = cellmap(mdata,
+                               chipnum=chipnum,
+                               color=color,
+                               size=size,
+                               sort_order=False,
+                               linewidth=1,
+                               edgecolor=(0, 0, 0, 0.2),
+                               ax=self.plot_ax
+                               )
 
         # This section is stubbed out because the MuData object structure is not fully defined
         # In a real scenario, this would access actual data.
@@ -140,6 +147,8 @@ class InteractiveImage:
         class MockChipset:
             def __init__(self):
                 self.chips = {chipnum: MockChip()}
+
+
         if 'xyz' not in mdata.mod:
              mdata.mod['xyz'] = md.MuData({'obs': pd.DataFrame()})
         if 'survey' not in mdata['xyz'].uns:
@@ -259,7 +268,6 @@ class InteractiveImage:
         self.roi_display_ax.axis('off')  # Hide the axes
 
         ## Pre-populate ROIs if group already exists
-
         if group in seg.columns and not delete:
             for roi_name in seg[group].cat.categories:
                 self.current_roi_name = roi_name
