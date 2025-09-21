@@ -16,7 +16,7 @@ import mudata as md
 
 # Survey libs
 from survey.singlecell.scutils import QuietScanpyLoad, filter_var
-from survey.genutils import pklop
+from survey.genutils import get_config, pklop
 
 ADATA_SUFFIX = '.h5ad'
 MDATA_SUFFIX = '.h5mu'
@@ -815,6 +815,61 @@ def make_mudata(exp_path: Union[str, Path],
         return mdata, metrics    
     else:
         return mdata
+
+
+def concat_mdatas(mdatas, 
+                  concat_kwargs=None) -> md.MuData:
+    """
+    Concatenate multiple mudata objects along the `obs` axis, preserving the 
+    *union* of all modalities, as opposed to the default behavior of 
+    MuData.concat(). This is done by concatenating each modality's `adata` 
+    separately using scanpy.concat() and building a new MuData object.
+
+    Parameters
+    ----------
+    mdatas : list of mudata.MuData
+        List of MuData objects to concatenate.
+    concat_kwargs : dict, optional
+        Additional keyword arguments to pass to `scanpy.concat()`. If any keys
+        overlap with the detected modalities, concat_kwargs will be understood as a
+        dict of dicts with modality-specific kwargs.
+    
+    Returns
+    -------
+    mudata.MuData
+        A single MuData object with concatenated modalities.
+    """
+
+    # Get the union of all mods in the mdata objects
+    all_mods = set().union(*[mdata.mod.keys() for mdata in mdatas])
+    concatenated = {}
+
+    if concat_kwargs is None:
+        concat_kwargs = {mod: {} for mod in all_mods}
+    elif any([k in concat_kwargs for k in all_mods]):
+        # Assume concat_kwargs is a dict of dicts with modality-specific kwargs
+        for mod in all_mods:
+            if mod not in concat_kwargs:
+                concat_kwargs[mod] = {}
+    else:
+        # Use the same kwargs for all modalities
+        concat_kwargs = {mod: concat_kwargs for mod in all_mods}
+        
+    for mod in all_mods:
+        # Get all adata objects for this modality from all mdatas where this modality exists
+        adatas_for_mod = [mdata[mod] for mdata in mdatas if mod in mdata.mod]
+
+        # Make sure `axis` isn't in concat_kwargs, since we always want to concat along obs
+        config = get_config(concat_kwargs[mod], {}, protected=['axis'])
+        
+        # Concatenate along the obs axis
+        concatenated[mod] = sc.concat(adatas_for_mod, axis=0, **config)
+
+    # Assuming 'mudata' has a constructor that takes a dictionary where keys are modalities and 
+    # values are the concatenated adata objects
+    concatenated_mdata = md.MuData(concatenated)
+    
+    return concatenated_mdata
 
 
 def write_data(data: Union[sc.AnnData, md.MuData],
