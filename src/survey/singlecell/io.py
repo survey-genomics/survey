@@ -16,12 +16,12 @@ import mudata as md
 
 # Survey libs
 from survey.singlecell.scutils import QuietScanpyLoad, filter_var
-from survey.genutils import pklop, get_config
+from survey.genutils import pklop
 
 ADATA_SUFFIX = '.h5ad'
 MDATA_SUFFIX = '.h5mu'
 
-def parse_experiment_string(input_string: str, 
+def parse_experiment_string(input_string: str,
                             is_match: bool = False) -> Union[bool, Dict[str, Optional[str]]]:
     """
     Parses an experiment string to extract experiment, sample, and tag information.
@@ -51,30 +51,48 @@ def parse_experiment_string(input_string: str,
         If `is_match` is False and `input_string` does not match the expected
         format.
     """
-    # Define the regex
-    pattern = r"^(exp\d{3})_(S.+?)(?:_(HTO|SBC))?$"
-    
-    # Match the input string
-    match = re.match(pattern, input_string)
+    exp = None
+    sample = None
+    tag = None
 
-    if is_match:
-        if match:
-            return True
-        else:
+    try:
+        exp = input_string.split('_')[0]
+
+        tag = input_string[::-1].split('_')[0][::-1]
+
+        if tag in ['rerun', 'reseq']:
+            tag = '_'.join(input_string[::-1].split('_')[:2])[::-1]
+        if re.match(r'^S[\d_-]+$', tag):
+            sample = tag
+            tag = None
+        
+        if sample is None:
+            sample = input_string.split('_', maxsplit=1)[1].split(tag)[0].strip('_')
+
+    except IndexError as e:
+        if is_match:
             return False
-    else:
-        if match:
-            # Extract the groups into a dictionary
-            return {
-                "exp": match.group(1).strip('exp'),  # The number after "exp"
-                "sample": match.group(2)[1:],    # The ID after "S"
-                "tag": match.group(3)      # The optional third part (e.g., SBC)
-            }
         else:
             # Raise an error if the string doesn't match the required format
-            raise ValueError(f"Expected format for input string is 'exp###_S#[_tag]', but got '{input_string}'.")
+            raise ValueError(f"Expected format for input string is 'exp###_S(#ID)[_tag]', but got '{input_string}'.")
+    
+    if not exp.startswith('exp') or not re.match(r'^S.*$', sample):
+        if is_match:
+            return False
+        else:
+            raise ValueError(f"Expected format for input string is 'exp###_S(#ID)[_tag]', but got '{input_string}'.")
 
-
+    if is_match:
+        return True
+    else:
+        return_dict = {
+            'exp': exp,
+            'sample': sample,
+            'tag': tag
+        }
+        return return_dict
+            
+            
 def detect_cellranger_run(path_to_outs: Union[str, Path]) -> bool:
     """
     Detects if a Cell Ranger run was 'multi' or 'count'.
@@ -211,12 +229,14 @@ class CellrangerOutdir:
         List of sample names if multiplexed, otherwise None.
     paths : dict
         A nested dictionary mapping sample tags to their relevant file paths,
-        such as filtered barcodes.
+        such as filtered barcodes and metrics summaries.
     raw_h5_path : Path
         Path to the raw feature-barcode matrix HDF5 file.
     """
 
-    def __init__(self, path_to_crout: Union[str, Path]) -> None:
+    def __init__(self, 
+                 path_to_crout: Union[str, Path],
+                 metrics: bool = False) -> None:
         if not isinstance(path_to_crout, Path):
             path_to_crout = Path(path_to_crout)
         
@@ -255,12 +275,22 @@ class CellrangerOutdir:
                 filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{self.id}/count/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
                 # self.paths[self.sampletag]['raw_h5'] = raw_h5_path
                 self.paths[self.sampletag]['filtered_bcs'] = filtered_bcs_path
+
+                metrics_summary_path = path_to_crout / f'outs/per_sample_outs/{self.id}/metrics_summary.csv'
+                if not metrics_summary_path.exists():
+                    metrics_summary_path = None
+                self.paths[self.sampletag]['metrics_summary'] = metrics_summary_path
             else:
                 for sample in self.multiplexed_samples:
                     self.paths[sample] = {}
                     filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{sample}/count/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
                     # self.paths[sample]['raw_h5'] = raw_h5_path
                     self.paths[sample]['filtered_bcs'] = filtered_bcs_path
+                    
+                    metrics_summary_path = path_to_crout / f'outs/per_sample_outs/{sample}/metrics_summary.csv'
+                    if not metrics_summary_path.exists():
+                        metrics_summary_path = None
+                    self.paths[sample]['metrics_summary'] = metrics_summary_path
         else:
             self.paths[self.sampletag] = {}
             raw_h5_path = path_to_crout / 'outs/raw_feature_bc_matrix.h5'
@@ -269,6 +299,11 @@ class CellrangerOutdir:
             # self.paths[self.sampletag]['raw_h5'] = raw_h5_path
 
             self.paths[self.sampletag]['filtered_bcs'] = path_to_crout / 'outs/filtered_feature_bc_matrix/barcodes.tsv.gz'
+
+            metrics_summary_path = path_to_crout / 'outs/metrics_summary.csv'
+            if not metrics_summary_path.exists():
+                metrics_summary_path = None
+            self.paths[self.sampletag]['metrics_summary'] = metrics_summary_path
 
     def __str__(self):
         return f"CellrangerOutdir({self.sampletag})"
@@ -480,6 +515,72 @@ class Experiment:
         
         return return_bcs
 
+    def get_metrics(self,
+                    sample: str) -> np.ndarray:
+        """
+        Gets sequencing metrics summary data for a given sample.
+
+        Parameters
+        ----------
+        sample : str
+            The sample identifier (e.g., 'S1').
+
+        Returns
+        -------
+        list of pandas.DataFrame
+        """
+
+        metrics = []
+
+        for crout in self.samples[sample]:
+            if crout.multi_run:
+                if not crout.multiplexed:
+                    for sampletag in crout.paths: # should only be one
+                        metrics_summary_path = crout.paths[sampletag]['metrics_summary']
+                        if metrics_summary_path is None:
+                            continue
+                        metrics_df = pd.read_csv(metrics_summary_path)
+                        metrics_df['crout'] = str(crout.path)
+                        for info_key in crout.info:
+                            metrics_df[info_key] = crout.info[info_key]
+                        metrics_df['multi_run'] = True
+                        metrics_df['multiplexed'] = False
+                        metrics_df['mux_sample'] = None
+                        metrics.append(metrics_df.T)
+                else:
+                    for sample in crout.multiplexed_samples:
+                        metrics_summary_path = crout.paths[sample]['metrics_summary']
+                        if metrics_summary_path is None:
+                            continue
+                        metrics_df = pd.read_csv(metrics_summary_path)
+                        metrics_df['crout'] = str(crout.path)
+                        for info_key in crout.info:
+                            metrics_df[info_key] = crout.info[info_key]
+                        metrics_df['multi_run'] = True
+                        metrics_df['multiplexed'] = True
+                        metrics_df['mux_sample'] = sample
+                        metrics.append(metrics_df.T)
+            else:
+                metrics_summary_path = crout.paths[crout.sampletag]['metrics_summary']
+                if metrics_summary_path is None:
+                    continue
+                metrics_df = pd.read_csv(metrics_summary_path)
+                metrics_df['crout'] = str(crout.path)
+                for info_key in crout.info:
+                    metrics_df[info_key] = crout.info[info_key]
+                metrics_df['multi_run'] = False
+                metrics_df['multiplexed'] = False
+                metrics_df['mux_sample'] = None
+                metrics.append(metrics_df.T)
+
+        if len(metrics) > 0:
+            metrics = pd.concat(metrics, axis=1)
+            metrics.columns = pd.RangeIndex(len(metrics.columns))
+        else:
+            metrics = pd.DataFrame()
+
+        return metrics
+
     def get_tags(self, sample: str) -> List[str]:
         """
         Retrieves all library tags associated with a given sample.
@@ -574,6 +675,7 @@ def make_mudata(exp_path: Union[str, Path],
                 identifiers: Optional[Dict] = None, 
                 use_bcs: str = 'union', 
                 use_gex: Optional[str] = None,
+                return_metrics: bool = False,
                 verbosity: int = 0) -> md.MuData:
     """
     Create a MuData object from 10x Genomics data for an experiment.
@@ -611,6 +713,9 @@ def make_mudata(exp_path: Union[str, Path],
         The library tag corresponding to the Gene Expression data to use for
         defining the primary set of cells and genes. If None (default), the
         first library tag from the first sample's `libs_dict` is used.
+    return_metrics : bool, optional
+        If True, returns a DataFrame with the metrics_summary.csv data for each
+        sample and library. Defaults to False.
     verbosity : int, optional
         Scanpy's verbosity level for loading data. Defaults to 0 (silent).
 
@@ -656,9 +761,16 @@ def make_mudata(exp_path: Union[str, Path],
         if 'batch' not in identifiers:
             identifiers['batch'] = default_batches
 
+    
+    if return_metrics:
+        metrics = []
+
     mdatas = []
+
     for sample, libs_dict, batch in zip(exp_data_mapper['samples'], exp_data_mapper['libs_dicts'], identifiers['batch']):
         bcs = exp.get_bcs(sample, use=use_bcs)
+        if return_metrics:
+            metrics.append(exp.get_metrics(sample))
 
         if use_gex is None:
             use_gex = list(libs_dict.keys())[0]
@@ -699,62 +811,10 @@ def make_mudata(exp_path: Union[str, Path],
     else:
         mdata = md.concat(mdatas)
 
-    return mdata
-
-
-def concat_mdatas(mdatas, 
-                  concat_kwargs=None) -> md.MuData:
-    """
-    Concatenate multiple mudata objects along the `obs` axis, preserving the 
-    *union* of all modalities, as opposed to the default behavior of 
-    MuData.concat(). This is done by concatenating each modality's `adata` 
-    separately using scanpy.concat() and building a new MuData object.
-
-    Parameters
-    ----------
-    mdatas : list of mudata.MuData
-        List of MuData objects to concatenate.
-    concat_kwargs : dict, optional
-        Additional keyword arguments to pass to `scanpy.concat()`. If any keys
-        overlap with the detected modalities, concat_kwargs will be understood as a
-        dict of dicts with modality-specific kwargs.
-    
-    Returns
-    -------
-    mudata.MuData
-        A single MuData object with concatenated modalities.
-    """
-
-    # Get the union of all mods in the mdata objects
-    all_mods = set().union(*[mdata.mod.keys() for mdata in mdatas])
-    concatenated = {}
-
-    if concat_kwargs is None:
-        concat_kwargs = {mod: {} for mod in all_mods}
-    elif any([k in concat_kwargs for k in all_mods]):
-        # Assume concat_kwargs is a dict of dicts with modality-specific kwargs
-        for mod in all_mods:
-            if mod not in concat_kwargs:
-                concat_kwargs[mod] = {}
+    if return_metrics:
+        return mdata, metrics    
     else:
-        # Use the same kwargs for all modalities
-        concat_kwargs = {mod: concat_kwargs for mod in all_mods}
-        
-    for mod in all_mods:
-        # Get all adata objects for this modality from all mdatas where this modality exists
-        adatas_for_mod = [mdata[mod] for mdata in mdatas if mod in mdata.mod]
-
-        # Make sure `axis` isn't in concat_kwargs, since we always want to concat along obs
-        config = get_config(concat_kwargs[mod], {}, protected=['axis'])
-        
-        # Concatenate along the obs axis
-        concatenated[mod] = sc.concat(adatas_for_mod, axis=0, **config)
-
-    # Assuming 'mudata' has a constructor that takes a dictionary where keys are modalities and 
-    # values are the concatenated adata objects
-    concatenated_mdata = md.MuData(concatenated)
-    
-    return concatenated_mdata
+        return mdata
 
 
 def write_data(data: Union[sc.AnnData, md.MuData],
