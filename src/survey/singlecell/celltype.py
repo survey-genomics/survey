@@ -24,7 +24,7 @@ from anytree.importer import DictImporter
 # Survey libs
 from survey.genplot import subplots
 from survey.singlecell.scutils import QuietScanpyLoad
-from survey.genutils import is_listlike, get_functional_dependency
+from survey.genutils import is_listlike, get_functional_dependency, get_mask
 from survey import singlecell as svc
 from survey.singlecell.meta import (
     add_colors, meta_exists, reset_meta_keys
@@ -322,6 +322,7 @@ class Clustering:
              mode: str = 'labeled',
              clusts: Optional[List[Union[str, int]]] = None,
              color: Optional[str] = None,
+             subset: Optional[Dict] = None,
              fss: float = 8,
              ar: float = 1,
              **kwargs) -> None:
@@ -340,6 +341,9 @@ class Clustering:
             highlights the results of the last `subcluster` operation.
         color : str, optional
             The key in `.obs` to color by. If None, uses the current active key.
+        subset : dict, optional
+            A dictionary of subsetting criteria, where keys are column
+            names in `self.adata.obs` and values are the values to keep.
         fss : float, optional
             Figure size scaler.
         ar : float, optional
@@ -350,17 +354,29 @@ class Clustering:
         if color is None:
             color = self.current_cluster_key
 
+        if subset is not None:
+            mask = get_mask(self.adata.obs, subset)
+            data = self.adata[mask]
+        else:
+            data = self.adata
+
         if mode == 'labeled':
             fig, ax = subplots(1, fss=fss, ar=ar)
-            ax = svc.pl.labeled_scatter(data=self.adata, color=color, ax=ax, **kwargs)
+            ax = svc.pl.labeled_scatter(data=data, color=color, ax=ax, **kwargs)
         elif mode == 'highlight':
             if clusts is None and self.pending_split_children is not None:
                 clusts = self.pending_split_children
-            ax = svc.pl.highlight(data=self.adata, color=color, cats=clusts, ar=ar, fss=fss, **kwargs)
+            ax = svc.pl.highlight(data=data, color=color, cats=clusts, ar=ar, fss=fss, **kwargs)
         elif mode == 'dual':
             fig, ax = subplots(2, fss=fss, ar=ar)
-            ax[0] = svc.pl.scatter(data=self.adata, color=color, ax=ax[0], legend=False)
-            ax[1] = svc.pl.labeled_scatter(data=self.adata, numbered=False, color=color, ax=ax[1], legend=True, **kwargs)
+            if not all([k in ['scatter', 'labeled_scatter'] for k in kwargs.keys()]):
+                scatter_kwargs = {}
+                labeled_kwargs = kwargs
+            else:
+                scatter_kwargs = kwargs['scatter']
+                labeled_kwargs = kwargs['labeled_scatter']
+            ax[0] = svc.pl.scatter(data=data, color=color, ax=ax[0], legend=False, **scatter_kwargs)
+            ax[1] = svc.pl.labeled_scatter(data=data, numbered=False, color=color, ax=ax[1], legend=True, **labeled_kwargs)
         else:
             raise ValueError("Invalid mode. Choose either 'labeled' or 'highlight'.")
 
