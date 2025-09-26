@@ -809,7 +809,7 @@ def make_mudata(exp_path: Union[str, Path],
     if len(mdatas) == 1:
         mdata = mdatas[0]
     else:
-        mdata = md.concat(mdatas)
+        mdata = concat_mdatas(mdatas)
 
     if return_metrics:
         return mdata, metrics    

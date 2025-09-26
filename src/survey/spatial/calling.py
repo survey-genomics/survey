@@ -79,11 +79,13 @@ def validate_mdata_chipset(mdata: md.MuData,
         if bctype not in mdata.mod:
             raise ValueError(f"mdata must contain modality for barcode type '{bctype}'.")
 
-        mdata_chip_nums = adata_bctype.obs[chip_key_prop].cat.categories
+        # mdata_chip_nums = adata_bctype.obs[chip_key_prop].cat.categories
 
-        if not all([num in mdata_chip_nums for num in chipset.chips]):
-            raise ValueError(
-                f"Chipset chip numbers {chipset.chip_nums} not found in {chip_key_prop} categories.")
+        # if not all([num in mdata_chip_nums for num in chipset.chips]):
+        #     raise ValueError(
+        #         f"Not all chip numbers in chipset are present in mdata['{bctype}'].obs['{chip_key_prop}']. "
+        #         f"Missing chip numbers: {list(set(chipset.chips) - set(mdata_chip_nums))}. "
+        #     )
         
     # Make sure that, for every chip, the set of cell barcodes for each bctype are identical
     for chip_num, chip in chipset.chips.items():
@@ -109,7 +111,7 @@ def get_faulty_bcs(mdata: md.MuData,
                    chipset: Optional[ChipSet] = None,
                    chip_nums: Optional[Union[int, List[int]]] = None,
                    chip_key_prop: str = 'chip-num',
-                   check_thresh: int = 500) -> Tuple[Dict, Dict]:
+                   check_thresh: Optional[Union[int, Dict[Any, Any]]] = None) -> Tuple[Dict, Dict]:
     """
     Identifies barcodes with high counts that are not in the provided layout.
 
@@ -126,8 +128,14 @@ def get_faulty_bcs(mdata: md.MuData,
         The chip number(s) to check. If None, all chips in the chipset are checked.
     chip_key_prop : str, optional
         The key in `.obs` that identifies the chip number.
-    check_thresh : int, optional
+    check_thresh : int or dict, optional
         The count threshold above which a non-layout barcode is flagged as "faulty".
+        This can be:
+        1. An integer threshold applied to all checks.
+        2. A dictionary `{bctype: threshold}` for bctype-specific thresholds.
+        3. A dictionary `{chip_num: threshold}` for chip-specific thresholds.
+        4. A nested dictionary `{chip_num: {bctype: threshold}}` for chip- and
+           bctype-specific thresholds.
 
     Returns
     -------
@@ -145,11 +153,35 @@ def get_faulty_bcs(mdata: md.MuData,
     faulty_counts = {}
 
     if chip_nums is None:
-        chip_nums = chipset.chips.keys()
+        chip_nums = list(chipset.chips.keys())
     elif not is_listlike(chip_nums):
         chip_nums = [chip_nums]
     elif not all([num in chipset.chips for num in chip_nums]):
         raise ValueError(f"chip_nums must be a list of chip numbers from the chipset: {list(chipset.chips.keys())}.")
+
+    # Validate check_thresh structure
+    if check_thresh is None:
+        check_thresh = 500
+    if isinstance(check_thresh, dict):
+        if not check_thresh: # empty dict
+            pass
+        else:
+            first_key = next(iter(check_thresh))
+            if isinstance(first_key, int) and first_key in chipset.chips: # chip-num keyed
+                if isinstance(check_thresh[first_key], dict): # Nested dict
+                    all_bctypes = chipset.bctypes
+                    for cn in check_thresh:
+                        if not all(bt in all_bctypes for bt in check_thresh[cn]):
+                            raise ValueError("Inner keys of check_thresh must be valid bctypes.")
+                elif not all(isinstance(v, int) for v in check_thresh.values()):
+                    raise ValueError("Values of chip-keyed check_thresh dict must be integers.")
+            elif isinstance(first_key, str) and first_key in chipset.bctypes: # bctype keyed
+                if not all(isinstance(v, int) for v in check_thresh.values()):
+                    raise ValueError("Values of bctype-keyed check_thresh dict must be integers.")
+            else:
+                raise ValueError("check_thresh dict keys must be chip numbers or bctypes.")
+    elif not isinstance(check_thresh, int):
+        raise TypeError("check_thresh must be an int or a dictionary.")
 
     for chip_num in chip_nums:
         chip = chipset.chips[chip_num]
@@ -165,7 +197,21 @@ def get_faulty_bcs(mdata: md.MuData,
             excluded_bcs = adata_bctype.var_names.difference(chip.layout.all_bcs)
 
             excluded_counts = adata_bctype[cbc_bool, excluded_bcs].to_df().sum(0)
-            above_thresh_bool = excluded_counts > check_thresh
+
+            current_thresh = 500 # Default
+            if isinstance(check_thresh, int):
+                current_thresh = check_thresh
+            elif isinstance(check_thresh, dict):
+                first_key = next(iter(check_thresh))
+                if isinstance(first_key, int): # chip-num keyed
+                    if isinstance(check_thresh.get(chip_num), dict):
+                        current_thresh = check_thresh[chip_num].get(bctype, 500)
+                    else:
+                        current_thresh = check_thresh.get(chip_num, 500)
+                else: # bctype keyed
+                    current_thresh = check_thresh.get(bctype, 500)
+
+            above_thresh_bool = excluded_counts > current_thresh
             bcs_above_thresh = above_thresh_bool.index[above_thresh_bool].to_list()
 
             faulty_bcs[chip_num][bctype] = bcs_above_thresh
@@ -175,7 +221,7 @@ def get_faulty_bcs(mdata: md.MuData,
             faulty_bcs_show = {bctype: ', '.join(bcs) for bctype, bcs in faulty_bcs[chip_num].items() if len(bcs) > 0}
 
             warnings.warn(
-                f"Spatial barcode counts for chip {chip_num} exceed {check_thresh} for barcodes: "
+                f"Spatial barcode counts for chip {chip_num} exceed threshold for barcodes: "
                 f"{faulty_bcs_show}, which were not found in layout {chip.layout.id}. "
                 "This suggests the chip layout is incorrect, please check your layout file.")
             
@@ -250,13 +296,29 @@ def get_adj(arr: np.ndarray, max_dist: int) -> np.ndarray:
         `adj[d, i, j]` is the proportion of barcode `j` among the neighbors
         of barcode `i` at distance `d+1`.
     """
-    adj = np.zeros((max_dist, *arr.shape), dtype=float)
+    # Get all unique barcode IDs, excluding the -1 placeholder for empty wells
+    unique_bcids = np.unique(arr[arr != -1])
+    if unique_bcids.size == 0:
+        # Handle case with no barcodes
+        return np.zeros((max_dist, 0, 0), dtype=float)
+    
+    num_barcodes = unique_bcids.max() + 1
+    adj = np.zeros((max_dist, num_barcodes, num_barcodes), dtype=float)
+
     for j in range(1, max_dist + 1):
-        for bcid in sorted(np.unique(arr)):
-            vals, counts = np.unique(arr[dilate_array(arr == bcid, num_iters=max_dist) == j], return_counts=True)
-            props = counts/counts.sum()
-            for v, p in zip(vals, props):
-                adj[j - 1, bcid, v] = p
+        for bcid in unique_bcids:
+            # Find neighbors at distance j
+            neighbor_mask = dilate_array(arr == bcid, num_iters=max_dist) == j
+            
+            # Get the barcode IDs of the neighbors, excluding empty wells
+            neighbor_bcs = arr[neighbor_mask]
+            neighbor_bcs = neighbor_bcs[neighbor_bcs != -1]
+
+            if neighbor_bcs.size > 0:
+                vals, counts = np.unique(neighbor_bcs, return_counts=True)
+                props = counts / counts.sum()
+                for v, p in zip(vals, props):
+                    adj[j - 1, bcid, v] = p
     return adj
 
 
@@ -422,6 +484,7 @@ class SpatialNormalizer:
                  mdata: md.MuData,
                  chip: Chip,
                  chip_key_prop: str = 'chip-num',
+                 bctypes: Optional[Union[str, List[str]]] = None,
                  max_dist: int = 3,
                  p_donate: float = 0.3,
                  nb_params: Optional[Dict] = None) -> None:
@@ -438,7 +501,16 @@ class SpatialNormalizer:
         counts = {}
         adjs = {}
 
+        if bctypes is None:
+            bctypes = chip.layout.bctypes
+        elif isinstance(bctypes, str):
+            bctypes = [bctypes]
+        elif not all([bt in chip.layout.bctypes for bt in bctypes]):
+            raise ValueError(f"bctypes must be a list of barcode types from the chip layout: {chip.layout.bctypes}.")
+
         for spidx, bctype in enumerate(chip.layout.bctypes):
+            if bctype not in bctypes:
+                continue
             cbc_bool = mdata[bctype].obs[chip_key_prop].isin([chip.num])
             var_bool = chip.layout.mappers[spidx].index
             counts[spidx] = mdata[bctype][cbc_bool, var_bool].to_df()
@@ -448,6 +520,7 @@ class SpatialNormalizer:
         self.mdata = mdata
         self.chip = chip
         self.chip_key_prop = chip_key_prop
+        self.bctypes = bctypes
         self.max_dist = max_dist
         self.p_donate = p_donate
         self.nb_params = nb_params
@@ -751,7 +824,9 @@ class SpatialNormalizer:
         `mdata` object with the normalized count values, modifying it in-place.
         """
 
-        for spidx, bctype in enumerate(self.layout.bctypes):
+        for spidx, bctype in enumerate(self.chip.layout.bctypes):
+            if bctype not in self.bctypes:
+                continue
 
             cbc_bool = self.mdata[bctype].obs[self.chip_key_prop].isin([self.chip.num])
             row_indices = np.argwhere(cbc_bool.values).flatten()
@@ -798,8 +873,9 @@ class SpatialCaller:
         # now but consider removing in future
         'none': 'None',
 
-        # `no_call_string`: used to identify cells that couldn't be called, i.e. were 
-        # attempted to be called but whose spatial barcode profile was ambiguous
+        # `no_call_string`: used to identify cells that couldn't be called, either because
+        # 1) they were attempted to be called but their spatial barcode profile was ambiguous
+        # 2) they returned a spatial barcodes combination that does not exist in the layout
         'amb': 'no_call'
     }
 
@@ -967,13 +1043,15 @@ class SpatialCaller:
             return s
         
 
-        def get_sorted():
+        def get_sorted(top_bcs):
 
             sorted = {spidx: [] for spidx in self.spmods}
 
             for spidx in self.spmods:
                 cbc_bool = self.spmods[spidx].obs[self.chip_key_prop].isin([self.chip.num])
                 vars = self.chip.layout.mappers[spidx].index
+                if len(vars) < top_bcs:
+                    raise ValueError(f"Number of spatial barcodes ({len(vars)}) is less than the requested top_bcs ({top_bcs}). Please reduce top_bcs.")
 
                 df = self.spmods[spidx][cbc_bool, vars].to_df()
 
@@ -1016,7 +1094,7 @@ class SpatialCaller:
         # Sort the counts, this is done first to speed up the computation of top stats
         if verbose:
             print("Sorting counts by cell barcode and count...")
-        sorted = get_sorted()
+        sorted = get_sorted(top_bcs=top_bcs)
 
         # Add the top stats, which are the top barcodes, their counts, normalized counts, and SNRs
         if verbose:
@@ -1396,6 +1474,14 @@ class SpatialCaller:
         spcall, stats = method_mapper[method](metrics, mods, **method_kwargs)
         spcall = spcall.astype('category')
         spcall = spcall.cat.add_categories([bc for bc in all_comb_bcs if bc not in spcall.cat.categories])
+        if any([i not in all_comb_bcs for i in spcall.cat.categories]):
+            warnings.warn(f"Some spatial calls for chip {self.chip.num} are not in the list of valid combinatorial " \
+                          f"barcodes from the layout. These will be set to {self.CALL_STRS['amb']}. See method stats for details.")
+            
+            spcall[~spcall.isin(all_comb_bcs)] = self.CALL_STRS['amb']
+            invalid_comb_bcs = [i for i in spcall.cat.categories if i not in all_comb_bcs]
+            stats.update({'invalid_combinatorial_barcodes': invalid_comb_bcs})
+            spcall = spcall.cat.remove_categories(invalid_comb_bcs)
 
         # Use the first mod as reference, they should all be the same (checked in add_mods)
         obs_names = self.spmods[0].obs_names
@@ -1608,7 +1694,61 @@ class SpatialPositioner:
 class Survey:
 
 
-    def __init__(self, mdata: md.MuData, chipset: ChipSet, chip_meta_key_prop=None, overwrite=False):
+    def __init__(self, mdata: md.MuData, 
+                 chipset: ChipSet, 
+                 chip_meta_key_prop=None, 
+                 overwrite=False,
+                 check_thresh=None) -> None:
+        """
+        A high-level class to orchestrate the spatial calling workflow.
+
+        This class acts as a pipeline manager for processing Survey's single-cell
+        spatial data. It takes a MuData object with raw counts and a ChipSet object
+        defining the physical layouts, and provides methods to normalize counts,
+        call cell barcodes, and assign spatial positions. The processing is
+        performed on a chip-by-chip basis, and the final results are
+        consolidated and applied back to the MuData object.
+
+        Parameters
+        ----------
+        mdata : md.MuData
+            The MuData object containing the raw count data, with separate
+            modalities for each barcode type (e.g., 'bctype1', 'bctype2').
+        chipset : ChipSet
+            The ChipSet object that defines the layouts and properties of all
+            chips in the experiment.
+        chip_meta_key_prop : tuple, optional
+            A tuple `(meta_key, chip_key_prop)` used to link cell metadata to
+            chip numbers. `meta_key` is the column in a metadata file and
+            `chip_key_prop` is the name of the new column to be created in `.obs`.
+            Defaults to `('rxn', 'chip-num')`.
+        overwrite : bool, optional
+            If True, allows overwriting of existing chip number information in
+            the MuData object. Defaults to False.
+
+        Attributes
+        ----------
+        mdata : md.MuData
+            The MuData object being processed.
+        chipset : ChipSet
+            The ChipSet definition for the experiment.
+        chip_key_prop : str
+            The key in `.obs` that identifies the chip number for each cell.
+        faulty_bcs : dict
+            A dictionary of barcodes with high counts that are not in the layout.
+        faulty_counts : dict
+            A dictionary of counts for the faulty barcodes.
+        normers : dict
+            A dictionary of `SpatialNormalizer` objects, keyed by chip number,
+            after running `normalize_counts`.
+        callers : dict
+            A dictionary of `SpatialCaller` objects, keyed by chip number,
+            after running `call_cells`.
+        positioners : dict
+            A dictionary of `SpatialPositioner` objects, keyed by chip number,
+            after running `position_cells`.
+
+        """
 
         if chip_meta_key_prop is None:
             meta_key, chip_key_prop = ('rxn', 'chip-num')
@@ -1628,7 +1768,7 @@ class Survey:
             meta.convert_to_categorical(mdata[mod].obs, chip_key_prop, verbose=False)
             
         # spmods = get_spmods_dict(mdata, chipset=chipset, chip_key_prop=chip_key_prop)
-        faulty_bcs, faulty_counts = get_faulty_bcs(mdata, chipset=chipset, chip_key_prop=chip_key_prop)
+        faulty_bcs, faulty_counts = get_faulty_bcs(mdata, chipset=chipset, chip_key_prop=chip_key_prop, check_thresh=check_thresh)
 
         self.chip_key_prop = chip_key_prop
         self.mdata = mdata
@@ -1637,9 +1777,10 @@ class Survey:
         self.faulty_counts = faulty_counts
 
         self.spatial = None
+        self.callers = {}
 
 
-    def normalize_counts(self):
+    def normalize_counts(self, bctypes=None):
         # save_gifs_dir=None, **kwargs
         """
         Normalize the counts in the spatial adatas.
@@ -1658,7 +1799,7 @@ class Survey:
 
             chip = self.chipset.chips[chip_num]
 
-            normer = SpatialNormalizer(self.mdata, chip, chip_key_prop=self.chip_key_prop)
+            normer = SpatialNormalizer(self.mdata, chip, chip_key_prop=self.chip_key_prop, bctypes=bctypes)
             
             # normer.iterate_donations(save_gif_dir=save_gif_dir, **kwargs)
             normer.iterate_donations()
@@ -1670,12 +1811,24 @@ class Survey:
         self.normers = normers
 
 
-    def call_cells(self, metrics_kwargs=None, spatial_call_kwargs=None, verbose=True):
+    def call_cells(self, 
+                   chipnums=None, 
+                   metrics_kwargs=None, 
+                   spatial_call_kwargs=None, 
+                   verbose=True):
         """
         Call cells using the spatial calling methods.
         This will modify the counts in place.
         """
 
+        if chipnums is None:
+            chipnums = list(self.chipset.chips.keys())
+        elif not is_listlike(chipnums):
+            chipnums = [chipnums]
+        chipnums = [c for c in chipnums if c in self.chipset.chips]
+        if len(chipnums) == 0:
+            raise ValueError("No valid chip numbers provided.")
+        # chipnums = list(self.chipset.chips.keys())
 
         default_metrics_kwargs = {
             'top_bcs': 5,
@@ -1711,10 +1864,36 @@ class Survey:
 
         metrics_kwargs = get_config(metrics_kwargs, default_metrics_kwargs)
         spatial_call_kwargs = get_config(spatial_call_kwargs, default_spatial_call_kwargs)
-        
+
+        if spatial_call_kwargs['method'] == 'm01': # Only call_qd is needed
+            method_kwargs = {}
+            for key in ['call_qd']:
+                method_kwargs[key] = spatial_call_kwargs['method_kwargs'].get(key)
+            spatial_call_kwargs['method_kwargs'] = method_kwargs
+            requested_top_bcs = metrics_kwargs.get('top_bcs')
+        elif spatial_call_kwargs['method'] == 'm02':
+            requested_top_bcs = max([metrics_kwargs.get('top_bcs'), 
+                                     spatial_call_kwargs['method_kwargs'].get('top_bcs')])
+
         callers = {}
 
-        for chip_num in self.chipset.chips:
+        not_enough_bcs = []
+        for chipnum in chipnums:
+            chip = self.chipset.chips[chipnum]
+            for spidx in chip.layout.mappers:
+                num_bcs_spidx = chip.layout.mappers[spidx].shape[0]
+                if num_bcs_spidx < requested_top_bcs:
+                    not_enough_bcs.append((chipnum, spidx, num_bcs_spidx))
+        
+        if len(not_enough_bcs) > 0:
+            for chipnum, spidx, num_bcs_spidx in not_enough_bcs:
+                msg = f"Chip {chipnum}, spatial index {spidx} has only {num_bcs_spidx} barcodes, " \
+                 f"which is less than the requested top_bcs of {requested_top_bcs}. Please adjust the " \
+                 "top_bcs parameter accordingly."
+                print(msg)
+            raise ValueError("Some chips do not have enough barcodes for the requested top_bcs.")
+
+        for chip_num in chipnums:
             chip = self.chipset.chips[chip_num]
 
             if verbose:
@@ -1733,7 +1912,7 @@ class Survey:
 
             callers[chip_num] = caller
 
-        self.callers = callers
+        self.callers.update(callers)
 
 
     def get_call_rates(self, by=None):
