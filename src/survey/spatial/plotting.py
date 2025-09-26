@@ -336,7 +336,7 @@ def arrplot(mdata: md.MuData,
             else:
                 wells = wells.loc[wells_show]
 
-            if dtypes['color']['type'] == 'num':
+            if (dtypes['color']['type'] == 'num') or (color is None and pd.api.types.is_numeric_dtype(pd.Series(wells))):
                 if norm is None:
                     norm = mpl.colors.Normalize(vmin=wells.min(), vmax=wells.max())
                 well_colors = wells.apply(lambda x: cmap(norm(x)))
@@ -410,16 +410,18 @@ def arrplot(mdata: md.MuData,
     # Determine data types for coloring, check cmap if numeric
     dtypes = determine_data(masked_mdata, color=color, basis=basis)
 
-    if dtypes['color']['type'] == 'num':
-        if cmap is None:
-            cmap = plt.get_cmap('viridis')
-        elif isinstance(cmap, str):
-            try:
-                cmap = plt.get_cmap(cmap)
-            except ValueError:
-                raise ValueError(f"Param `cmap` string '{cmap}' is not a valid matplotlib colormap name.")
-        elif not isinstance(cmap, mpl.colors.Colormap):
-            raise ValueError("Param `cmap` must be a valid matplotlib colormap instance.")
+    # Avoid only checking cmap if color is None, because wells can be a dict of numbers
+    # for which we'll still need a cmap to map to colors; this is only checked inside _add_wells
+    # # if dtypes['color']['type'] == 'num':
+    if cmap is None:
+        cmap = plt.get_cmap('viridis')
+    elif isinstance(cmap, str):
+        try:
+            cmap = plt.get_cmap(cmap)
+        except ValueError:
+            raise ValueError(f"Param `cmap` string '{cmap}' is not a valid matplotlib colormap name.")
+    elif not isinstance(cmap, mpl.colors.Colormap):
+        raise ValueError("Param `cmap` must be a valid matplotlib colormap instance.")
 
     # Add all the requested elements to the plot
     if img is not None:
@@ -593,6 +595,8 @@ def hoodmap(mdata: md.MuData,
             size: HoodMapCircleSize = None,
             wedgeprops: Optional[Dict[str, Any]] = None,
             circleprops: Optional[Dict[str, Any]] = None,
+            legend: bool = True,
+            legend_params: Optional[Dict[str, Any]] = None,
             **kwargs: Any) -> plt.Axes:
     """
     Plots neighborhood-level data on a spatial array plot using pie charts or circles.
@@ -630,8 +634,10 @@ def hoodmap(mdata: md.MuData,
         Properties for the pie chart wedges (see `matplotlib.patches.Wedge`).
     circleprops : dict, optional
         Properties for the circles drawn around/for each well (see `matplotlib.patches.Circle`).
-    **kwargs
-        Additional keyword arguments.
+    legend : bool, default True
+        If True, adds a legend for the pie chart colors (if `color` is provided).
+    legend_params : dict, optional
+        Parameters for the legend (if `color` is provided).
 
     Returns
     -------
@@ -758,6 +764,10 @@ def hoodmap(mdata: md.MuData,
         
         for i, ((id, x, y, size), row) in enumerate(piedf.iterrows()):
             ax.pie(row.values, center=(x, y), radius=size, colors=[cdict[i] for i in row.index], wedgeprops=wedgeprops)
+
+        if legend:
+            legend_params = get_add_legend_pm().get_params(legend_params)
+            ax = decorate_scatter(ax, config=legend_params, plot_type='legend', cdict=cdict)
 
     if circleprops is not None:
         for i, ((id, x, y, size), row) in enumerate(piedf.iterrows()):
