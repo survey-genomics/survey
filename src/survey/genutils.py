@@ -8,6 +8,7 @@ import warnings
 from inspect import signature, Parameter
 import pickle as pkl
 from numbers import Number
+import textwrap
 
 # Standard libs
 import numpy as np
@@ -816,3 +817,24 @@ def get_functional_dependency(df: pd.DataFrame,
     mapping = pd.Series(unique_pairs[dependent_col].values, 
                         index=unique_pairs[independent_col]).to_dict()
     return mapping
+
+
+def blockprint(listlike: list, width: int = 60) -> None:
+    '''
+    Pretty prints a long list by wrapping lines.
+
+    Parameters
+    ----------
+    listlike : list
+        The list to print.
+    width : int, default 60
+        The maximum line width.
+
+    Returns
+    -------
+    None, prints to console.
+    '''
+    if not is_listlike(listlike):
+        raise TypeError("Input must be list-like.")
+    print('\n'.join(textwrap.wrap(', '.join(list(map(str,listlike))), width=width)))
+
