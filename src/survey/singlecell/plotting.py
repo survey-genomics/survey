@@ -4,11 +4,15 @@ import numbers
 from copy import deepcopy
 import re
 from typing import Optional, Union, Dict, Any, Tuple, List
+import itertools as it
 
 # Standard libs
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+from scipy.signal import find_peaks
 
 # Single-cell libs
 import scanpy as sc
@@ -126,7 +130,7 @@ def get_plot_data(data: Union[sc.AnnData, md.MuData],
                   size: Optional[Union[float, List[float]]] = None,
                   scale: Optional[float] = None,
                   layer: Optional[str] = None,
-                  sort_order: bool = True) -> Tuple[pd.DataFrame, Dict, Optional[Dict]]:
+                  sort_order: bool = None) -> Tuple[pd.DataFrame, Dict, Optional[Dict]]:
     """
     Prepares a DataFrame for plotting from single-cell data.
 
@@ -296,7 +300,7 @@ def get_plot_data(data: Union[sc.AnnData, md.MuData],
 def scatter(data: Union[sc.AnnData, md.MuData],
             color: Optional[str] = None,
             layer: Optional[str] = None,
-            sort_order: bool = True,
+            sort_order: bool = None,
             mod: Optional[str] = None,
             basis: str = 'umap',
             components: Optional[List[int]] = None,
@@ -1025,3 +1029,430 @@ def freq_chart(data: Union[sc.AnnData, pd.DataFrame],
     else:
         return axes
     
+
+class Ridge:
+    """
+    A class to create, manage, and plot ridge plots from a DataFrame.
+
+    This class encapsulates the data and methods for generating ridge plots,
+    including histogram and KDE computation, peak detection, and normalization.
+    """
+    def __init__(self, df: pd.DataFrame, x: str, y: str, hue: Optional[str] = None):
+        """
+        Initializes the Ridge object with data.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The input DataFrame containing the data to plot.
+        x : str
+            The column name for the x-axis values.
+        y : str
+            The column name to group by for the ridges on the y-axis.
+        hue : str, optional
+            The column name for color encoding within each group, by default None.
+        """
+        self.df = df
+        self.x = x
+        self.y = y
+        self.hue = hue
+        self.data = None
+        self.peaks = None
+        self.normalized_df = None
+        self.target_anchors = None
+        self.order = None
+
+
+    def _get_kde(self, n, bins, n_points=1000, log_scale=False, **kwargs):
+        """
+        Compute the Kernel Density Estimate (KDE) from histogram data.
+
+        Parameters
+        ----------
+        n : np.ndarray
+            The counts for each bin of the histogram.
+        bins : np.ndarray
+            The bin edges of the histogram.
+        n_points : int, optional
+            The number of points to evaluate the KDE on, by default 1000.
+        log_scale : bool, optional
+            Whether the data is on a log scale, by default False.
+        **kwargs
+            Additional keyword arguments passed to `scipy.stats.gaussian_kde`.
+
+        Returns
+        -------
+        tuple
+            A tuple containing the x-grid and KDE values.
+        """
+        # Compute the midpoints of the bins
+        bin_midpoints = (bins[:-1] + bins[1:]) / 2
+
+        # Repeat the midpoints according to the counts
+        data = np.repeat(bin_midpoints, n)
+
+        if log_scale:
+            # Transform data to log10 scale, handling non-positive values
+            data = np.log10(data[data > 0])
+
+        # Compute the KDE
+        if len(data) == 0:
+            return np.array([]), np.array([])
+        kde = gaussian_kde(data, **kwargs)
+
+        # Evaluate the KDE on a grid in log space if necessary
+        if log_scale:
+            min_bin = bins[0] if bins[0] > 0 else 1e-9
+            max_bin = bins[-1]
+            x_grid = np.linspace(np.log10(min_bin), np.log10(max_bin), n_points)
+        else:
+            x_grid = np.linspace(bins[0], bins[-1], n_points)
+
+        kde_values = kde(x_grid)
+
+        if log_scale:
+            # Transform x_grid back to base 10 scale
+            x_grid = np.power(10, x_grid)
+
+        return x_grid, kde_values
+
+
+    def add_ridge_data(self, hist=False, kde=False, bins=100, log_bins=False, order=None, kde_params=None):
+        """
+        Computes histogram and/or KDE data for the ridge plot and adds it to the instance.
+
+        Parameters
+        ----------
+        hist : bool, optional
+            Whether to compute histogram data, by default False.
+        kde : bool, optional
+            Whether to compute KDE data, by default False.
+        bins : int or array-like, optional
+            The number of bins or pre-computed bins for the histogram, by default 100.
+        log_bins : bool, optional
+            Whether to use log-scaled bins, by default False.
+        order : list, optional
+            The order for the ridges on the y-axis, by default None.
+        kde_params : dict, optional
+            Parameters for KDE computation, by default None.
+        """
+        if not hist and not kde:
+            raise ValueError("At least one of 'hist' or 'kde' must be True.")
+
+        plotby_unique = self.df[self.y].unique()
+        if order is not None:
+            assert all([i in order for i in plotby_unique]), 'All unique values in y must be in order'
+            plotby_unique = order
+        
+        self.order = plotby_unique
+
+        if self.data is None:
+            self.data = {}
+
+        for unique_y in plotby_unique:
+            df_subset = self.df[self.df[self.y] == unique_y]
+            if unique_y not in self.data:
+                self.data[unique_y] = {}
+
+            hue_values = df_subset[self.hue].unique() if self.hue else [None]
+            for hue_value in hue_values:
+                if self.hue:
+                    values = df_subset[self.x][df_subset[self.hue] == hue_value].values
+                else:
+                    values = df_subset[self.x].values
+
+                if isinstance(bins, int):
+                    if log_bins:
+                        min_val = values.min() if len(values) > 0 else 1e-9
+                        if min_val <= 0: min_val = 1e-9
+                        max_val = values.max() if len(values) > 0 else 1
+                        nphist_bins = np.logspace(np.log10(min_val), np.log10(max_val), bins)
+                    else:
+                        min_val = values.min() if len(values) > 0 else 0
+                        max_val = values.max() if len(values) > 0 else 1
+                        nphist_bins = np.linspace(min_val, max_val, bins)
+                else:
+                    nphist_bins = bins
+                
+                key = hue_value if self.hue else 'default'
+                if key not in self.data[unique_y]:
+                    self.data[unique_y][key] = {}
+
+                if hist:
+                    nphist_n, _ = np.histogram(values, bins=nphist_bins)
+                    self.data[unique_y][key]['hist'] = (nphist_n, nphist_bins)
+                
+                if kde:
+                    if 'hist' in self.data[unique_y][key]:
+                        nphist_n, nphist_bins = self.data[unique_y][key]['hist']
+                    else: # hist must be computed for kde
+                        nphist_n, _ = np.histogram(values, bins=nphist_bins)
+                    x_grid, kde_values = self._get_kde(nphist_n, nphist_bins, log_scale=log_bins, **(kde_params or {}))
+                    self.data[unique_y][key]['kde'] = (x_grid, kde_values)
+
+
+    def add_peaks(self, height=0.01, distance=10, prominence=0.01, valleys=False):
+        """
+        Finds peaks or valleys in the KDE values and adds them to the instance.
+
+        Parameters
+        ----------
+        height : float, optional
+            Required height of peaks, by default 0.01.
+        distance : int, optional
+            Required minimal horizontal distance in samples between neighbouring peaks, by default 10.
+        prominence : float, optional
+            Required prominence of peaks, by default 0.01.
+        valleys : bool, optional
+            If True, finds valleys instead of peaks, by default False.
+        
+        Raises
+        ------
+        ValueError
+            If KDE data has not been computed yet.
+        """
+        if self.data is None:
+            raise ValueError("KDE data not available. Please run `add_ridge_data` with `kde_params` first.")
+
+        peaks = []
+        for feature in self.data:
+            for sample in self.data[feature]:
+                y_values = self.data[feature][sample]['kde'][1]
+                if not y_values.any(): continue
+                if valleys:
+                    y_values = -(y_values - y_values.max())
+                samp_peaks, _ = find_peaks(x=y_values, height=height, distance=distance, prominence=prominence)
+                if len(samp_peaks) > 0:
+                    peaks.append((feature, sample, *self.data[feature][sample]['kde'][0][samp_peaks]))
+        
+        if not peaks:
+            self.peaks = pd.DataFrame(columns=['feature', 'sample']).set_index(['feature', 'sample'])
+            return
+
+        peaks = pd.DataFrame(peaks)
+        cols_length = len(peaks.columns)
+        peaks.columns = ['feature', 'sample'] + [i for i in range(cols_length - 2)]
+        peaks = peaks.set_index(['feature', 'sample'])
+        self.peaks = peaks
+
+
+    def normalize_by_anchors(self, anchor_dict: Dict[str, Tuple[float, ...]]):
+        """
+        Normalizes features in the DataFrame based on provided anchor points.
+
+        This function performs a piecewise linear transformation for each specified
+        feature (column) to align its anchor points with a target set of anchors.
+        The results are stored in `self.normalized_df` and `self.target_anchors`.
+
+        Parameters
+        ----------
+        anchor_dict : Dict[str, Tuple[float, ...]]
+            A dictionary mapping feature names (column names) to a tuple
+            of sorted anchor points. E.g., {'feature_A': (10, 50, 90)}.
+
+        Raises
+        ------
+        ValueError
+            If anchor_dict is invalid or features are not in the data.
+        """
+        if not anchor_dict:
+            raise ValueError("Anchor dictionary is empty. Please provide valid anchor points for normalization.")
+
+        it = iter(anchor_dict.values())
+        first_len = len(next(it))
+        if not all(len(val) == first_len for val in it):
+            raise ValueError("All anchor point tuples in the dictionary must have the same length.")
+        if first_len < 2:
+            raise ValueError("Anchor point tuples must have at least two points.")
+
+        for feature_name in anchor_dict.keys():
+            if feature_name not in self.df.columns:
+                raise ValueError(f"Feature '{feature_name}' from anchor_dict not found in data_matrix columns.")
+
+        target_anchors = min(anchor_dict.values(), key=lambda anchors: anchors[0])
+        normalized_matrix = self.df.copy()
+
+        for feature_name, source_anchors in anchor_dict.items():
+            source_anchors = tuple(sorted(source_anchors))
+            original_values = normalized_matrix[feature_name].to_numpy(dtype=float)
+            new_values = np.zeros_like(original_values)
+
+            lower_bound = source_anchors[0]
+            lower_shift = target_anchors[0] - lower_bound
+            mask_below = original_values < lower_bound
+            new_values[mask_below] = original_values[mask_below] + lower_shift
+
+            upper_bound = source_anchors[-1]
+            upper_shift = target_anchors[-1] - upper_bound
+            mask_above = original_values > upper_bound
+            new_values[mask_above] = original_values[mask_above] + upper_shift
+
+            for i in range(len(source_anchors) - 1):
+                x1, x2 = source_anchors[i], source_anchors[i+1]
+                y1, y2 = target_anchors[i], target_anchors[i+1]
+                
+                if i == 0:
+                    mask_segment = (original_values >= x1) & (original_values <= x2)
+                else:
+                    mask_segment = (original_values > x1) & (original_values <= x2)
+
+                segment_values = original_values[mask_segment]
+                
+                if x1 == x2:
+                    new_values[mask_segment] = y1
+                else:
+                    scale = (y2 - y1) / (x2 - x1)
+                    new_values[mask_segment] = y1 + (segment_values - x1) * scale
+            
+            normalized_matrix[feature_name] = new_values
+
+        self.normalized_df = normalized_matrix
+        self.target_anchors = target_anchors
+
+
+    def plot(self, log_bins=False, colors=None, alpha=0.8, hspace=-0.5,
+            #  label_pos='bottom_right', 
+             hist=True, kde=False, fill_between=False, 
+             legend=False, legend_params=None, subplots_kwargs=None):
+        """
+        Generate and display the ridge plot.
+
+        Parameters
+        ----------
+        log_bins : bool, optional
+            Whether to use log-scaled bins on the x-axis, by default False.
+        colors : iterable, optional
+            An iterable of colors for the plots, by default None.
+        alpha : float, optional
+            The alpha transparency for histograms and KDE fills, by default 0.8.
+        hspace : float, optional
+            The height space between subplots, by default -0.5.
+        label_pos : str, optional
+            Position of the y-labels (e.g., 'bottom_right'), by default 'bottom_right'.
+        hist : bool, optional
+            Whether to plot the histogram, by default True.
+        kde : bool, optional
+            Whether to plot the KDE curve, by default False.
+        fill_between : bool, optional
+            Whether to fill the area under the KDE curve, by default False.
+        legend : bool, optional
+            Whether to display a legend, by default False.
+        legend_params : dict, optional
+            Parameters for legend configuration, by default None.
+        subplots_kwargs : dict, optional
+            Keyword arguments for `survey.genplot.subplots`, by default None.
+
+        Returns
+        -------
+        tuple
+            A tuple containing the matplotlib Figure and Axes objects.
+            
+        Raises
+        ------
+        ValueError
+            If required data for plotting has not been computed yet.
+        """
+        if self.data is None:
+            raise ValueError("Plot data not available. Please run `add_ridge_data` first.")
+        if hist and any('hist' not in v.get(key, {}) for v in self.data.values() for key in v):
+            raise ValueError("Histogram data not available. Please run `add_ridge_data` with `hist=True` to compute it.")
+        if kde and any('kde' not in v.get(key, {}) for v in self.data.values() for key in v):
+            raise ValueError("KDE data not available. Please run `add_ridge_data` with `kde=True` to compute it.")
+
+        plotby_unique = list(self.data.keys())
+
+        default_subplots_kwargs = {'ar': 5, 'fss': 1.5}
+        restricted_subplots_kwargs = ['num_plots', 'max_cols', 'sharex']
+        if subplots_kwargs is None:
+            subplots_kwargs = {}
+        if any([i in subplots_kwargs for i in restricted_subplots_kwargs]):
+            raise ValueError('Restricted keyword arguments: %s' % restricted_subplots_kwargs)
+        subplots_kwargs = {**default_subplots_kwargs, **subplots_kwargs}
+
+        fig, axes = subplots(len(plotby_unique), 1, sharex=True, **subplots_kwargs)
+        if len(plotby_unique) == 1:
+            axes = [axes]
+        if log_bins:
+            axes[0].set_xscale('log')
+        if colors is None:
+            colors = it.cycle(sns.color_palette())
+
+        color_iter = iter(colors) 
+
+        for unique_y, ax in zip(plotby_unique, axes.flat):
+            if self.hue:
+                hue_values = list(self.data[unique_y].keys())
+                hue_colors = [next(color_iter) for _ in hue_values]
+            else:
+                hue_values = [None]
+                c = next(color_iter)
+                hue_colors = [c]
+
+            labels = []
+
+            for i, (hue_value, hue_color) in enumerate(zip(hue_values, hue_colors)):
+                key = hue_value if self.hue else 'default'
+                if key not in self.data[unique_y]: continue
+
+                if self.hue:
+                    labels.append(f'{hue_value}')
+                else:
+                    labels.append(str(unique_y))
+
+                max_hist = None
+                if hist:
+                    nphist_n, nphist_bins = self.data[unique_y][key]['hist']
+                    ax.hist(nphist_bins[:-1], bins=nphist_bins, weights=nphist_n, alpha=alpha,
+                            facecolor=hue_color, linewidth=0, zorder=i)
+                    max_hist = np.max(nphist_n)
+                    
+                if kde:
+                    x_grid, kde_values = self.data[unique_y][key]['kde']
+                    if len(x_grid) == 0: continue
+
+                    kde_values_scaled = kde_values.copy()
+                    if hist and max_hist is not None and np.max(kde_values_scaled) > 0:
+                        kde_values_scaled *= max_hist / np.max(kde_values_scaled)
+                    
+                    ax.plot(x_grid, kde_values_scaled, color=hue_color, zorder=i)
+
+                    if fill_between:
+                        ax.fill_between(x_grid, kde_values_scaled, color=hue_color, alpha=alpha, zorder=i)
+
+            if legend:
+                adjusted_default_legend_params = {'bbox_to_anchor': (1, 0), 'loc': 'lower right', 
+                                                  'title': self.hue if self.hue else None, 'title_fontsize': 8}
+                default_legend_params = get_pm('legend').get_params(adjusted_default_legend_params)
+                config = get_config(legend_params, default_legend_params)
+                if self.hue:
+                    cdict = dict(zip(hue_values, hue_colors))
+                    ax = decorate_scatter(ax, plot_type='legend', config=config, cdict=cdict)
+                else:
+                    cdict = {str(unique_y): c}
+                    ax = decorate_scatter(ax, plot_type='legend', config=config, cdict=cdict)
+
+            
+            # coords = {'bottom': 0.1, 'left': 0.1, 'top': 0.9, 'right': 0.9, 'center': 0.5}
+            # va, ha = label_pos.split('_')
+
+            axis_elements_color = 'k' if self.hue else c
+
+            # ax.text(coords[ha], coords[va], '\n'.join(labels), transform=ax.transAxes,
+            #         ha=ha, va=va, color=plot_colors, fontweight='bold')
+
+
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['bottom'].set_color(axis_elements_color)
+            ax.spines['bottom'].set_linewidth(3)
+            if len(ax.get_yticks()) > 1:
+                max_ytick = ax.get_yticks()[-1]
+                ax.set_yticks([0, max_ytick])
+                ax.set_yticklabels([None, "{:.3g}".format(max_ytick)], color=axis_elements_color, fontweight='bold')
+            ax.set_facecolor((0, 0, 0, 0))
+
+        fig.subplots_adjust(hspace=hspace)
+        ax.set_xlabel(self.x)
+
+        return fig, axes
+
