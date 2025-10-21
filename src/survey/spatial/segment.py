@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from matplotlib.widgets import TextBox, CheckButtons, RadioButtons
+from matplotlib.widgets import TextBox, CheckButtons, RadioButtons, Button
 from scipy.spatial import distance
 from skimage import morphology
 
@@ -186,6 +186,11 @@ class InteractiveImage:
         self.click_mode = 'fill'
         self.click_type = 'individual'
 
+        # Undo/Redo state tracking
+        self.state_history = []  # List of (state_id, selected_ids_copy, rois_copy) tuples
+        self.current_state_id = 0
+        self.current_history_index = -1  # -1 means no states yet
+
         survey_plot_position = self.plot_ax.get_position()
 
         ## ROI Name Text Box Input
@@ -232,6 +237,28 @@ class InteractiveImage:
         # Connect the radio to a callback function
         self.radio.on_clicked(self.radio_callback)
 
+        ## Undo and Redo Buttons
+
+        # Set the width and height of the buttons
+        button_ax_width = 0.045  # Adjust as needed
+        button_ax_height = 0.04  # Adjust as needed
+        button_spacing = 0.005
+
+        # Calculate the left and bottom coordinates for the undo button
+        undo_ax_left = settings_left
+        undo_ax_bottom = survey_plot_position.y1 - radio_ax_height - button_ax_height - 0.01
+
+        # Create axes for undo button
+        self.undo_button_ax = plt.axes([undo_ax_left, undo_ax_bottom, button_ax_width, button_ax_height])
+        self.undo_button = mpl.widgets.Button(self.undo_button_ax, 'Undo')
+        self.undo_button.on_clicked(self.undo_callback)
+
+        # Create axes for redo button
+        redo_ax_left = undo_ax_left + button_ax_width + button_spacing
+        self.redo_button_ax = plt.axes([redo_ax_left, undo_ax_bottom, button_ax_width, button_ax_height])
+        self.redo_button = mpl.widgets.Button(self.redo_button_ax, 'Redo')
+        self.redo_button.on_clicked(self.redo_callback)
+
         ## Clicking Mode AutoReset CheckButtons
 
         # Set the width and height of the checkbox
@@ -240,7 +267,7 @@ class InteractiveImage:
 
         # Calculate the left and bottom coordinates for the checkbox
         checkbox_ax_left = settings_left
-        checkbox_ax_bottom = survey_plot_position.y1 - radio_ax_height - checkbox_ax_height
+        checkbox_ax_bottom = survey_plot_position.y1 - radio_ax_height - 0.04 - 0.01 - checkbox_ax_height
 
         # Create a new axes instance for the checkbox
         self.checkbox_ax = plt.axes([checkbox_ax_left, checkbox_ax_bottom, checkbox_ax_width, checkbox_ax_height])  # Adjust the position and size as needed
@@ -260,7 +287,7 @@ class InteractiveImage:
 
         # Calculate the left and bottom coordinates for the ROI legend
         roi_ax_left = settings_left + 0.01
-        roi_ax_bottom = survey_plot_position.y1 - radio_ax_height - checkbox_ax_height - roi_ax_height
+        roi_ax_bottom = survey_plot_position.y1 - radio_ax_height - 0.04 - 0.01 - checkbox_ax_height - roi_ax_height
 
         # Create a new axes instance for the ROI legend
         self.roi_display_ax = plt.axes([roi_ax_left, roi_ax_bottom, roi_ax_width, roi_ax_height])  # Adjust the position and size as needed
@@ -281,6 +308,60 @@ class InteractiveImage:
 
             self.update_roi_display()
             self.current_roi_name = ''
+        
+        # Save initial state after pre-population
+        self.save_state()
+
+    def save_state(self) -> None:
+        """Saves the current state to history for undo/redo functionality."""
+        # Create deep copies of the current state
+        selected_ids_copy = self.selected_ids.copy()
+        rois_copy = self.rois.copy()
+        
+        # If we're not at the end of history, discard all future states
+        if self.current_history_index < len(self.state_history) - 1:
+            self.state_history = self.state_history[:self.current_history_index + 1]
+        
+        # Add the new state
+        self.current_state_id += 1
+        self.state_history.append((self.current_state_id, selected_ids_copy, rois_copy))
+        self.current_history_index += 1
+
+    def restore_state(self, state_id: int, selected_ids: pd.DataFrame, rois: pd.DataFrame) -> None:
+        """Restores a saved state."""
+        # Remove all current patches from the plot
+        for poly in self.selected_ids['poly'].values:
+            poly.remove()
+        
+        # Restore the selected_ids and rois
+        self.selected_ids = selected_ids.copy()
+        self.rois = rois.copy()
+        
+        # Re-add patches for the restored state
+        self.update_cdict()
+        for id in self.selected_ids.index:
+            roi_name = self.selected_ids.loc[id, 'roi']
+            color = self.roi_cdict[roi_name]
+            poly = mpl.patches.Polygon(self.arr.verts[id], closed=True, facecolor=color)
+            self.plot_ax.add_patch(poly)
+            self.selected_ids.loc[id, 'poly'] = poly
+        
+        self.update_roi_display()
+        self.fig.canvas.draw_idle()
+
+    def undo_callback(self, event) -> None:
+        """Handles undo button clicks."""
+        if self.current_history_index > 0:
+            self.current_history_index -= 1
+            state_id, selected_ids, rois = self.state_history[self.current_history_index]
+            self.restore_state(state_id, selected_ids, rois)
+
+    def redo_callback(self, event) -> None:
+        """Handles redo button clicks."""
+        if self.current_history_index < len(self.state_history) - 1:
+            self.current_history_index += 1
+            state_id, selected_ids, rois = self.state_history[self.current_history_index]
+            self.restore_state(state_id, selected_ids, rois)
 
     def update_cdict(self) -> None:
         """Updates the internal ROI name to color dictionary."""
@@ -577,6 +658,9 @@ class InteractiveImage:
                     self.selected_ids.loc[id, 'poly'].set_facecolor(new_fc)
                 self.update_roi_display()
                 self.text_box.set_val('')
+
+            # Save state after any change
+            self.save_state()
 
             # Refresh the displayed image
             self.fig.canvas.draw_idle()

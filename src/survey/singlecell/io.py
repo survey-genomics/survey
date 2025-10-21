@@ -16,7 +16,7 @@ import mudata as md
 
 # Survey libs
 from survey.singlecell.scutils import QuietScanpyLoad, filter_var
-from survey.genutils import get_config, pklop
+from survey.genutils import get_config, pklop, is_listlike
 
 ADATA_SUFFIX = '.h5ad'
 MDATA_SUFFIX = '.h5mu'
@@ -128,7 +128,8 @@ def detect_cellranger_run(path_to_outs: Union[str, Path]) -> bool:
         raise ValueError(
             f"One of the cellranger multi files is missing at {path_to_outs}. "
             "Expected files/dir: " + ', '.join(cellranger_multi_files) + ". "
-            "Cannot determine cellranger run type.")
+            "Cannot determine cellranger run type. Please make sure all files are present and "
+            "no other directories were mistakenly synced.")
     elif all([i in in_outs for i in cellranger_count_files]):
         multi_run = False
     elif any([i in in_outs for i in cellranger_count_files]):
@@ -405,10 +406,11 @@ class Experiment:
                     else:
                         missing.append(crout.path)
                 for sampletag in crout.paths:
-                    for path in crout.paths[sampletag].values():
-                        if not path.exists():
+                    for pathkey in crout.paths[sampletag]:
+                        path = crout.paths[sampletag][pathkey]
+                        if path is None or not path.exists():
                             if error:
-                                raise FileNotFoundError(f"Expected file {path} does not exist in {crout.path}.")
+                                raise FileNotFoundError(f"Expected file for {pathkey} in {crout.path} does not exist.")
                             else:
                                 missing.append(path)
         if missing:
@@ -675,6 +677,7 @@ def make_mudata(exp_path: Union[str, Path],
                 identifiers: Optional[Dict] = None, 
                 use_bcs: str = 'union', 
                 use_gex: Optional[str] = None,
+                use_mtx: bool = False,
                 return_metrics: bool = False,
                 verbosity: int = 0) -> md.MuData:
     """
@@ -713,6 +716,9 @@ def make_mudata(exp_path: Union[str, Path],
         The library tag corresponding to the Gene Expression data to use for
         defining the primary set of cells and genes. If None (default), the
         first library tag from the first sample's `libs_dict` is used.
+    use_mtx : bool, optional
+        If True, uses the raw matrix.mtx files instead of the raw_feature_bc_matrix.h5.
+        Defaults to False.
     return_metrics : bool, optional
         If True, returns a DataFrame with the metrics_summary.csv data for each
         sample and library. Defaults to False.
@@ -781,7 +787,10 @@ def make_mudata(exp_path: Union[str, Path],
         
         # Add the gex_use rna
         with QuietScanpyLoad(verbosity):
-            adata = sc.read_10x_h5(crout.raw_h5_path, gex_only=False)
+            if use_mtx:
+                adata = sc.read_10x_mtx(crout.raw_h5_path.with_suffix(''), gex_only=False)
+            else:
+                adata = sc.read_10x_h5(crout.raw_h5_path, gex_only=False)
             adata.var_names_make_unique()
 
         gex_vars = adata.var_names[adata.var['feature_types'] == 'Gene Expression']
@@ -793,7 +802,10 @@ def make_mudata(exp_path: Union[str, Path],
         for tag in libs_dict:
             crout = exp.get_crout_tag(sample, tag)    
             with QuietScanpyLoad(verbosity):
-                adata = sc.read_10x_h5(crout.raw_h5_path, gex_only=False)
+                if use_mtx:
+                    adata = sc.read_10x_mtx(crout.raw_h5_path.with_suffix(''), gex_only=False)
+                else:
+                    adata = sc.read_10x_h5(crout.raw_h5_path, gex_only=False)
                 adata.var_names_make_unique()
             for mod in libs_dict[tag]:
                 tag_var = filter_var(adata.var, libs_dict[tag], mod)
@@ -817,8 +829,9 @@ def make_mudata(exp_path: Union[str, Path],
         return mdata
 
 
-def concat_mdatas(mdatas, 
-                  concat_kwargs=None) -> md.MuData:
+def concat_mdatas(mdatas: List[md.MuData], 
+                  concat_kwargs: Dict = None,
+                  store_vars: bool = False) -> md.MuData:
     """
     Concatenate multiple mudata objects along the `obs` axis, preserving the 
     *union* of all modalities, as opposed to the default behavior of 
@@ -833,7 +846,12 @@ def concat_mdatas(mdatas,
         Additional keyword arguments to pass to `scanpy.concat()`. If any keys
         overlap with the detected modalities, concat_kwargs will be understood as a
         dict of dicts with modality-specific kwargs.
-    
+    store_vars : bool, optional
+        If True and `join=outer` is provided via `concat_kwargs`, stores the specific
+        variables present in each adata (or only the adata for which there are concat_kwargs) 
+        in `adata.uns['vars_dict']`. If a list-like is provided, it should be the same 
+        length as `mdatas` and will be used as the keys in the `vars_dict`. Default is False.
+
     Returns
     -------
     mudata.MuData
@@ -864,6 +882,21 @@ def concat_mdatas(mdatas,
         
         # Concatenate along the obs axis
         concatenated[mod] = sc.concat(adatas_for_mod, axis=0, **config)
+
+        if config.get('join', None) == 'outer' and store_vars is not False:
+            if store_vars is True:
+                keys = [f"adata_{i}" for i in range(len(adatas_for_mod))]
+            elif is_listlike(store_vars):
+                if not len(store_vars) == len(adatas_for_mod):
+                    raise ValueError("If providing a list-like for `store_vars`, it must match the number of adatas being concatenated.")
+                keys = store_vars
+                store_vars = True
+            else:
+                raise TypeError(f"`store_vars` must be a bool or list-like if `join='outer'` is used in `concat_kwargs`, not {type(store_vars)}.")
+            if store_vars:
+                # Store the specific variables present in each adata in .uns['vars_dict']
+                vars_dict = {key: adata.var_names.tolist() for key, adata in zip(keys, adatas_for_mod)}
+                concatenated[mod].uns['vars_dict'] = vars_dict
 
     # Assuming 'mudata' has a constructor that takes a dictionary where keys are modalities and 
     # values are the concatenated adata objects
