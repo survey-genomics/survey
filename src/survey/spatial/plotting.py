@@ -893,7 +893,7 @@ def segplot(mdata: md.MuData,
         fig, axes = subplots(len(chipnums), fss=fss, ar=ar, as_seq=True)
     elif isinstance(ax, mpl.axes.Axes) and len(chipnums) == 1:
         axes = [ax]
-    elif not is_listlike(ax) or len(ax) != len(chipnums):
+    elif not is_listlike(ax) or len(ax) < len(chipnums):
         raise ValueError("Param `ax` must be None, a single Axes object for a single chip, or a list of Axes objects.")
     else:
         axes = ax
