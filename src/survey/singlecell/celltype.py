@@ -1055,7 +1055,7 @@ class Annotate:
         self._build_hierarchy_tree()
 
         # --- Align Cell Barcodes ---
-        self._align_cell_barcodes()
+        self.align_cell_barcodes(self.adata, self.df, self.id_var, verbose=self.verbose)
 
         # --- Create Cluster Mapping ---
         self._add_mapping()
@@ -1119,33 +1119,34 @@ class Annotate:
         if self.verbose:
             print("Hierarchy tree built successfully.")
 
-    def _align_cell_barcodes(self):
+    @staticmethod
+    def align_cell_barcodes(adata, df, id_var, verbose=False):
         """Aligns cell barcodes between `adata.obs` and the reference `df`.
 
         This internal method handles cases where cell barcodes may require a
         batch identifier to be unique. It modifies `self.df` in place to ensure
         its index aligns with `self.adata.obs.index`.
         """
-        if self.verbose:
+        if verbose:
             print("Aligning cell barcodes...")
 
-        self.obs['detected_batch'] = self.obs.index.str.split('-').str[1]
+        adata.obs['detected_batch'] = adata.obs.index.str.split('-').str[1]
 
         try:
-            id_to_batch_map = get_functional_dependency(self.obs, (self.id_var, 'detected_batch'))
+            id_to_batch_map = get_functional_dependency(adata.obs, (id_var, 'detected_batch'))
         except ValueError as e:
-            raise ValueError(f"Could not create a unique mapping from '{self.id_var}' to 'detected_batch' in adata.obs. {e}")
+            raise ValueError(f"Could not create a unique mapping from '{id_var}' to 'detected_batch' in adata.obs. {e}")
 
-        self.df['correct_batch'] = self.df[self.id_var].map(id_to_batch_map)
-        self.df.dropna(inplace=True)
+        df['correct_batch'] = df[id_var].map(id_to_batch_map)
+        df.dropna(inplace=True)
 
-        nucleotides = self.df.index.str.split('-').str[0]
-        new_index = nucleotides + '-' + self.df['correct_batch'].astype(str)
+        nucleotides = df.index.str.split('-').str[0]
+        new_index = nucleotides + '-' + df['correct_batch'].astype(str)
 
-        self.df.index = new_index
-        self.df.drop(columns=['correct_batch', self.id_var], inplace=True)
+        df.index = new_index
+        df.drop(columns=['correct_batch', id_var], inplace=True)
 
-        if self.verbose:
+        if verbose:
             print("Cell barcodes aligned.")
 
     def _add_mapping(self):
@@ -1242,11 +1243,14 @@ class Annotate:
             cluster_map = self.mapping[cluster]
             max_rate = cluster_map.vcounts.max() if not cluster_map.vcounts.empty else 0.0
             if max_rate < thresh:
-                low_map_rates.append(cluster_map.vcounts)
+                if cluster_map.vcounts.empty:
+                    low_map_rates.append(pd.Series(0, index=['N/A'], dtype=float))
+                else:
+                    low_map_rates.append(cluster_map.vcounts)
                 low_map_rate_clusters.append(cluster)
         
         if not low_map_rates:
-            return pd.Series(dtype=float)
+            return pd.Series(0, index=['N/A'], dtype=float)
             
         low_map_rates = pd.concat(low_map_rates, axis=0, keys=low_map_rate_clusters)
         return low_map_rates
@@ -1279,6 +1283,34 @@ class Annotate:
                 ])
                 print(print_str)
                 print()
+
+    def get_top_mapper(self, clusts, map_thresh: float = 0.75):
+        """Gets the top-mapping annotation for clusters below a confidence threshold.
+
+        This is a helper method for getting a mapper to supply to `apply()`, mapping
+        the specific clusters in `clusts` to their top annotation.
+
+        Parameters
+        ----------
+        clusts : List[str]
+            A list of cluster labels to map, a subset of those with low mapping rates
+            based on `map_thresh`.
+        map_thresh : float, optional
+            The confidence threshold to identify low-mapping clusters.
+            Defaults to 0.75.
+        """
+        top_mapper = {}
+        low_map_rates = self.get_low_map_rates(map_thresh)
+        if low_map_rates.empty:
+            print(f"No clusters found with max mapping rate below {map_thresh}.")
+        else:
+            for cluster in low_map_rates.index.get_level_values(0).unique():
+                if cluster not in clusts:
+                    continue
+                proportions = low_map_rates.loc[cluster]
+                top_ct = proportions.idxmax()
+                top_mapper[cluster] = self.leaf_id_map.get(top_ct, 'N/A')
+        return top_mapper
 
     def apply(self, threshold: float, cluster_map: Dict[str, Any] = None):
         """Applies annotations to `adata.obs` based on mapping rates.

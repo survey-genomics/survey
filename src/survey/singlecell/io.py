@@ -488,9 +488,9 @@ class Experiment:
                 else:
                     sub_bcs = []
                     for sample in crout.multiplexed_samples: # multiple, take the union no matter what
-                        bcs_path = crout.paths[sampletag]['filtered_bcs']
+                        bcs_path = crout.paths[sample]['filtered_bcs']
                         sub_bcs.append(pd.read_csv(bcs_path, sep='\t', header=None).values.flatten().tolist())
-                    bcs.append(np.union1d(sub_bcs))
+                    bcs.append(reduce(np.union1d, sub_bcs))
             else:
                 bcs_path = crout.paths[crout.sampletag]['filtered_bcs']
                 bcs.append(pd.read_csv(bcs_path, sep='\t', header=None).values.flatten().tolist())

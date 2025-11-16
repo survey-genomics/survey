@@ -579,42 +579,26 @@ def set_tick_params(ax: mpl.axes.Axes,
     `ax.set_yticklabels`. The remaining keywords are passed directly to
     `ax.tick_params`.
     """
-    label_kws = {}
-    # These are common Text properties that can be passed to set_ticklabels
-    label_prop_keys = [
-        'alpha', 'backgroundcolor', 'bbox', 'color', 'fontfamily', 'fontname',
-        'fontproperties', 'fontsize', 'fontstyle', 'fontweight', 'ha',
-        'horizontalalignment', 'label', 'linespacing', 'ma', 'multialignment',
-        'name', 'position', 'rotation', 'rotation_mode', 'size', 'style',
-        'transform', 'va', 'verticalalignment', 'visible', 'wrap', 'zorder'
-    ]
-    
-    # Separate label properties from other tick_params properties
-    for key in list(kwargs.keys()):
-        # `labelsize` in tick_params corresponds to `size` in set_ticklabels
-        if key == 'labelsize':
-            label_kws['size'] = kwargs.pop(key)
-        elif key in label_prop_keys:
-            label_kws[key] = kwargs.pop(key)
+    alignment_kws = {}
+    for key in ['ha', 'horizontalalignment']:
+        if key in kwargs:
+            alignment_kws['ha'] = kwargs.pop(key)
+    for key in ['va', 'verticalalignment']:
+        if key in kwargs:
+            alignment_kws['va'] = kwargs.pop(key)
 
     ax.tick_params(**kwargs)
 
-    if label_kws:
-        # Normalize 'ha' and 'va' keys
-        if 'horizontalalignment' in label_kws:
-            label_kws['ha'] = label_kws.pop('horizontalalignment')
-        if 'verticalalignment' in label_kws:
-            label_kws['va'] = label_kws.pop('verticalalignment')
-
+    if alignment_kws:
         axis = kwargs.get('axis', 'both')
         if axis in ['x', 'both']:
             # To prevent UserWarning about FixedLocator, we get and set ticks
             ax.set_xticks(ax.get_xticks())
-            ax.set_xticklabels(ax.get_xticklabels(), **label_kws)
+            ax.set_xticklabels(ax.get_xticklabels(), **alignment_kws)
         if axis in ['y', 'both']:
             # To prevent UserWarning about FixedLocator, we get and set ticks
             ax.set_yticks(ax.get_yticks())
-            ax.set_yticklabels(ax.get_yticklabels(), **label_kws)
+            ax.set_yticklabels(ax.get_yticklabels(), **alignment_kws)
 
     return ax
 
