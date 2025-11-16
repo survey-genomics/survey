@@ -148,24 +148,26 @@ def get_lerper(lims1: AxisLimits,
 
 
 def arrplot(mdata: md.MuData,
-         chipnum: int,
-         color: Optional[str] = None,
-         subset: Optional[Dict] = None,
-         ax: Optional[plt.Axes] = None,
-         fss: int = 10,
-         units: str = 'm',
-         borders: bool = False,
-         walls: bool = False,
-         wells: Optional[Union[Dict, pd.Series, Callable]] = None,
-         return_welldata: bool = False,
-         thresh: Optional[Number] = None,
-         layer: Optional[str] = None,
-         cmap: Optional[mpl.colors.Colormap] = None,
-         norm: Optional[mpl.colors.Normalize] = None,
-         img: Optional[Tuple[Path, int]] = None,
-         plot_label_params: Optional[Dict[str, Any]] = None,
-         cbar_params: Optional[Dict[str, Any]] = None,
-         invert: bool = False) -> plt.Axes:
+            chipnum: int,
+            color: Optional[str] = None,
+            subset: Optional[Dict] = None,
+            ax: Optional[plt.Axes] = None,
+            fss: int = 10,
+            units: str = 'm',
+            borders: bool = False,
+            walls: bool = False,
+            wells: Optional[Union[Dict, pd.Series, Callable]] = None,
+            return_welldata: bool = False,
+            thresh: Optional[Number] = None,
+            layer: Optional[str] = None,
+            cmap: Optional[mpl.colors.Colormap] = None,
+            norm: Optional[mpl.colors.Normalize] = None,
+            img: Optional[Tuple[Path, int]] = None,
+            plot_label: bool = True,
+            plot_label_params: Optional[Dict[str, Any]] = None,
+            cbar: bool = True,
+            cbar_params: Optional[Dict[str, Any]] = None,
+            invert: bool = False) -> plt.Axes:
     """
     Plots array-based spatial features for a single chip.
 
@@ -208,8 +210,12 @@ def arrplot(mdata: md.MuData,
         The normalization for numeric `color` data.
     img : tuple of (Path, int), optional
         A tuple containing the path to the image directory and the image index to display.
+    plot_label : bool, default True
+        If True, adds a label to the plot indicating the `color` variable.
     plot_label_params : dict, optional
         Parameters for the plot label.
+    cbar : bool, default True
+        If True, adds a colorbar to the plot for numeric `color` data.
     cbar_params : dict, optional
         Parameters for the colorbar.
     invert : bool, default False
@@ -301,7 +307,7 @@ def arrplot(mdata: md.MuData,
         return ax
     
 
-    def _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, layer, lims, dtypes, configs, lerper):
+    def _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, layer, lims, dtypes, cbar, plot_label, configs, lerper):
 
         center = [np.mean(v) for k, v in lims.items()]
 
@@ -354,12 +360,13 @@ def arrplot(mdata: md.MuData,
                                            edgecolor=None, linewidth=0)
                 ax.add_patch(poly)
             
-            if dtypes['color']['type'] == 'num':
+            if cbar and dtypes['color']['type'] == 'num':
                 center = np.array([center, center]).T
                 scpc = ax.scatter(*center, c=[wells.min(), wells.max()], cmap=cmap, norm=norm, s=0)
                 ax = decorate_scatter(ax, config=configs['cbar'], plot_type='cbar', scpc=scpc, fig=ax.figure)
             
-            ax = decorate_scatter(ax, config=configs['plot_label'], plot_type='plot_label', label=color)
+            if plot_label:
+                ax = decorate_scatter(ax, config=configs['plot_label'], plot_type='plot_label', label=color)
         else:
             raise ValueError('Param `wells` must be a callable function, a dict, or a pd.Series')
         return ax, wells
@@ -434,7 +441,9 @@ def arrplot(mdata: md.MuData,
         ax = _add_walls(walls, chip, ax, lerper)
 
     if wells is not None:
-        ax, welldata = _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, layer, lims, dtypes, configs, lerper)
+        ax, welldata = _add_wells(masked_mdata, wells, thresh, chip, ax, 
+                                  cmap, norm, color, layer, lims, dtypes, 
+                                  cbar, plot_label, configs, lerper)
 
     # Clean up the plot, make similar to svc.pl.scatter
     if invert:
