@@ -36,6 +36,45 @@ VA_VALUES = {
     "lower right": "bottom"
 }
 
+LEGEND_PLACEMENT_CODES = {
+    # --- INSIDE AXES ('1' Series) ---
+    'TL1': {'loc': 'upper left',   'bbox_to_anchor': (0 + MARGIN, 1 - MARGIN)},
+    'TC1': {'loc': 'upper center', 'bbox_to_anchor': (0.5, 1 - MARGIN)},
+    'TR1': {'loc': 'upper right',  'bbox_to_anchor': (1 - MARGIN, 1 - MARGIN)},
+    'ML1': {'loc': 'center left',  'bbox_to_anchor': (0 + MARGIN, 0.5 + MARGIN)},
+    'MR1': {'loc': 'center right', 'bbox_to_anchor': (1 - MARGIN, 0.5 - MARGIN)},
+    'BL1': {'loc': 'lower left',   'bbox_to_anchor': (0 + MARGIN, 0 + MARGIN)},
+    'BC1': {'loc': 'lower center', 'bbox_to_anchor': (0.5, 0 + MARGIN)},
+    'BR1': {'loc': 'lower right',  'bbox_to_anchor': (1 - MARGIN, 0 + MARGIN)},
+
+    # --- OUTSIDE AXES (Center Edges) ---
+    'TC2': {'loc': 'lower center', 'bbox_to_anchor': (0.5, 1 + MARGIN)},
+    'BC2': {'loc': 'upper center', 'bbox_to_anchor': (0.5, 0 - MARGIN)},
+    'ML2': {'loc': 'center right', 'bbox_to_anchor': (0 - MARGIN, 0.5 + MARGIN)},
+    'MR2': {'loc': 'center left',  'bbox_to_anchor': (1 + MARGIN, 0.5 - MARGIN)},
+
+    # --- OUTSIDE AXES (Corner Adjacents) ---
+    # Anchored at (0, 1) - Top-Left Corner
+    'TL2': {'loc': 'upper right',  'bbox_to_anchor': (0 - MARGIN, 1 + MARGIN)},
+    'TL3': {'loc': 'lower left',   'bbox_to_anchor': (0 - MARGIN, 1 + MARGIN)},
+    'TL4': {'loc': 'lower right',  'bbox_to_anchor': (0 - MARGIN, 1 + MARGIN)},
+
+    # Anchored at (1, 1) - Top-Right Corner
+    'TR2': {'loc': 'upper left',   'bbox_to_anchor': (1 + MARGIN, 1 + MARGIN)},
+    'TR3': {'loc': 'lower right',  'bbox_to_anchor': (1 + MARGIN, 1 + MARGIN)},
+    'TR4': {'loc': 'lower left',   'bbox_to_anchor': (1 + MARGIN, 1 + MARGIN)},
+
+    # Anchored at (0, 0) - Bottom-Left Corner
+    'BL2': {'loc': 'lower right',  'bbox_to_anchor': (0 - MARGIN, 0 - MARGIN)},
+    'BL3': {'loc': 'upper left',   'bbox_to_anchor': (0 - MARGIN, 0 - MARGIN)},
+    'BL4': {'loc': 'upper right',  'bbox_to_anchor': (0 - MARGIN, 0 - MARGIN)},
+
+    # Anchored at (1, 0) - Bottom-Right Corner
+    'BR2': {'loc': 'lower left',   'bbox_to_anchor': (1 + MARGIN, 0 - MARGIN)},
+    'BR3': {'loc': 'upper right',  'bbox_to_anchor': (1 + MARGIN, 0 - MARGIN)},
+    'BR4': {'loc': 'upper left',   'bbox_to_anchor': (1 + MARGIN, 0 - MARGIN)},
+}
+
 def get_text_position_vals(label_pos: str) -> Tuple[Tuple[float, float], str, str]:
     """
     Retrieves coordinates and alignment for a predefined corner position.
@@ -230,6 +269,30 @@ def get_add_legend_pm() -> ParamManager:
         else:
             return {}
         return return_dict
+    
+    def _fontsize_setter(v):
+        # default weight to bold if only size provided
+        return_dict ={
+                'prop': {'size': v, 'weight': 'bold'} 
+            }
+        return return_dict
+
+    def _fontweight_setter(v):
+        return_dict ={
+                'prop': {'weight': v}
+            }
+        return return_dict
+    
+    def _legend_position_setter(v):
+        if v is None:
+            return {}
+        elif v in LEGEND_PLACEMENT_CODES:
+            return LEGEND_PLACEMENT_CODES[v]
+        else:
+            raise ValueError(
+                f"Invalid legend position code: {v}. "
+                f"Must be one of {', '.join(list(LEGEND_PLACEMENT_CODES.keys()))}."
+                )
 
     # param, value, type, prop, setter, error
     defaults = [
@@ -237,15 +300,19 @@ def get_add_legend_pm() -> ParamManager:
         ['show_marker', False, 'm', True, _marker_setter, []],
         ['labelcolor', 'linecolor', 'd', None, None, []],
         ['prop', {'weight': 'bold', 'size': 12}, 'd', None, None, []],
+        ['fontsize', None, 'm', None, _fontsize_setter, []], # will override prop if provided
+        ['fontweight', None, 'm', None, _fontweight_setter, []], # will override prop if provided
         ['loc', 'upper left', 'd', None, None, []],
-        ['bbox_to_anchor', CORNER_POSITIONS['upper left'], 'd', None, None, []]
+        ['bbox_to_anchor', CORNER_POSITIONS['upper left'], 'd', None, None, []],
+        ['pos', None, 'm', None, _legend_position_setter, []]
     ]
 
     func = mpl.axes.Axes.legend
     
-    error_on = {
-        'fontsize': "Avoid using 'fontsize' in the legend parameters. Use 'prop={'size': <size>}' instead."
-        }
+    # error_on = {
+    #     'fontsize': "Avoid using 'fontsize' in the legend parameters. Use 'prop={'size': <size>}' instead."
+    #     }
+    error_on = {}
     
     pm = ParamManager(defaults, func=func, error_on=error_on)
 
