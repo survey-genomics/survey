@@ -316,7 +316,7 @@ def scatter(data: Union[sc.AnnData, md.MuData],
             legend: Optional[bool] = None,
             legend_params: Optional[Dict] = None,
             lims: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None,
-            invert: bool = False,
+            invert: bool = None,
             **kwargs) -> plt.Axes:
     """
     Creates a scatter plot from single-cell data, typically an embedding.
@@ -1057,7 +1057,7 @@ class Ridge:
         self.y = y
         self.hue = hue
         self.data = None
-        self.peaks = None
+        self.breaks = None
         self.normalized_df = None
         self.target_anchors = None
         self.order = None
@@ -1096,7 +1096,7 @@ class Ridge:
             data = np.log10(data[data > 0])
 
         # Compute the KDE
-        if len(data) == 0:
+        if len(data) == 0 or data.size <= 1:
             return np.array([]), np.array([])
         kde = gaussian_kde(data, **kwargs)
 
@@ -1191,49 +1191,101 @@ class Ridge:
                     self.data[unique_y][key]['kde'] = (x_grid, kde_values)
 
 
-    def add_peaks(self, height=0.01, distance=10, prominence=0.01, valleys=False):
+    def find_breaks(self, breaktype="peaks", height=0.01, distance=10, prominence=0.01, window=3, tolerance=0.001, buffer=0.05):
         """
-        Finds peaks or valleys in the KDE values and adds them to the instance.
+        Finds natural breaks (peaks, valleys, or plateaus) in the KDE values and adds them to the instance.
 
         Parameters
         ----------
+        breaktype : str, optional
+            Type of breaks to find. Options are "peaks", "valleys", or "plateaus", by default "peaks".
         height : float, optional
             Required height of peaks, by default 0.01.
         distance : int, optional
             Required minimal horizontal distance in samples between neighbouring peaks, by default 10.
         prominence : float, optional
             Required prominence of peaks, by default 0.01.
-        valleys : bool, optional
-            If True, finds valleys instead of peaks, by default False.
-        
+        window : int, optional
+            Window size for moving average when finding plateaus, by default 1.
+        tolerance : float, optional
+            Tolerance of KDE slope to be within zero for plateau detection, by default 0.01.
+        buffer : float, optional
+            Buffer distance (as a proportion of max KDE x values) to skip before scanning for plateau, by default 0.05.
+
         Raises
         ------
         ValueError
-            If KDE data has not been computed yet.
+            If KDE data has not been computed yet or if breaktype is not recognized.
         """
         if self.data is None:
             raise ValueError("KDE data not available. Please run `add_ridge_data` with `kde_params` first.")
 
-        peaks = []
+        if breaktype not in ["peaks", "valleys", "plateaus"]:
+            raise ValueError("breaktype must be 'peaks', 'valleys', or 'plateaus'.")
+
+        breaks = []
         for feature in self.data:
             for sample in self.data[feature]:
+                x_values = self.data[feature][sample]['kde'][0]
                 y_values = self.data[feature][sample]['kde'][1]
                 if not y_values.any(): continue
-                if valleys:
+                
+                if breaktype == "valleys":
                     y_values = -(y_values - y_values.max())
-                samp_peaks, _ = find_peaks(x=y_values, height=height, distance=distance, prominence=prominence)
-                if len(samp_peaks) > 0:
-                    peaks.append((feature, sample, *self.data[feature][sample]['kde'][0][samp_peaks]))
+                
+                if breaktype in ["peaks", "valleys"]:
+                    detected_peaks, _ = find_peaks(x=y_values, height=height, distance=distance, prominence=prominence)
+                    if len(detected_peaks) > 0:
+                        breaks.append((feature, sample, *x_values[detected_peaks]))
+                        
+                elif breaktype == "plateaus":
+                    # Find the first peak
+                    detected_peaks, _ = find_peaks(x=y_values, height=height, distance=distance, prominence=prominence)
+                    if len(detected_peaks) > 0:
+                        first_peak_idx = detected_peaks[0]
+                        max_x_value = np.max(x_values)
+                        min_x_value = np.min(x_values)
+                        slope_tolerance = tolerance
+                        
+                        # Determine starting point for scanning, accounting for buffer
+                        scan_start_idx = first_peak_idx + window
+                        if buffer is not None:
+                            # Find the index that corresponds to the buffer distance
+                            peak_x_value = x_values[first_peak_idx]
+                            buffer_x_value = peak_x_value + buffer*(max_x_value - min_x_value)
+                            # Find the closest index to the buffer distance
+                            buffer_idx = np.argmin(np.abs(x_values - buffer_x_value))
+                            scan_start_idx = max(scan_start_idx, buffer_idx)
+                        
+                        # Scan rightward from the starting point to find where it levels off (plateau start)
+                        plateau_start_idx = first_peak_idx  # Default to peak if no plateau found
+                        for i in range(scan_start_idx, len(y_values) - window):
+                            # Calculate moving window average slope
+                            window_y = y_values[i-window:i+window+1]
+                            window_x = np.arange(len(window_y))
+                            if len(window_y) > 1:
+                                slope = np.polyfit(window_x, window_y, 1)[0]
+                                if abs(slope) <= slope_tolerance:
+                                    plateau_start_idx = i
+                                    break
+                        
+                        # # Add both the peak and plateau start
+                        # plateau_points = [x_values[first_peak_idx], x_values[plateau_start_idx]]
+                        
+                        # Add just the plateau start
+                        plateau_points = [x_values[plateau_start_idx]]
+
+                        breaks.append((feature, sample, *plateau_points))
         
-        if not peaks:
-            self.peaks = pd.DataFrame(columns=['feature', 'sample']).set_index(['feature', 'sample'])
+        if not breaks:
+            self.breaks = pd.DataFrame(columns=['feature', 'sample']).set_index(['feature', 'sample'])
             return
 
-        peaks = pd.DataFrame(peaks)
-        cols_length = len(peaks.columns)
-        peaks.columns = ['feature', 'sample'] + [i for i in range(cols_length - 2)]
-        peaks = peaks.set_index(['feature', 'sample'])
-        self.peaks = peaks
+        breaks_df = pd.DataFrame(breaks)
+        cols_length = len(breaks_df.columns)
+        breaks_df.columns = ['feature', 'sample'] + [i for i in range(cols_length - 2)]
+        breaks_df = breaks_df.set_index(['feature', 'sample'])
+        self.breaks = breaks_df
 
 
     def normalize_by_anchors(self, anchor_dict: Dict[str, Tuple[float, ...]]):
@@ -1312,8 +1364,9 @@ class Ridge:
 
     def plot(self, log_bins=False, colors=None, alpha=0.8, hspace=-0.5,
             #  label_pos='bottom_right', 
-             hist=True, kde=False, fill_between=False, 
-             legend=False, legend_params=None, subplots_kwargs=None):
+             hist=True, kde=False, fill_between=False,
+             legend=False, legend_params=None, subplots_kwargs=None,
+             default_tick_color='k', num_cols=1):
         """
         Generate and display the ridge plot.
 
@@ -1341,6 +1394,10 @@ class Ridge:
             Parameters for legend configuration, by default None.
         subplots_kwargs : dict, optional
             Keyword arguments for `survey.genplot.subplots`, by default None.
+        default_tick_color : str, optional
+            Default color for axis ticks when no hue is used, by default 'k'.
+        num_cols : int, optional
+            Number of columns to arrange the ridge plots in, by default 1.
 
         Returns
         -------
@@ -1369,17 +1426,30 @@ class Ridge:
             raise ValueError('Restricted keyword arguments: %s' % restricted_subplots_kwargs)
         subplots_kwargs = {**default_subplots_kwargs, **subplots_kwargs}
 
-        fig, axes = subplots(len(plotby_unique), 1, sharex=True, **subplots_kwargs)
-        if len(plotby_unique) == 1:
-            axes = [axes]
+        # Calculate layout for multiple columns
+        if num_cols > 1:
+            num_rows = int(np.ceil(len(plotby_unique) / num_cols))
+            fig, axes = subplots(len(plotby_unique), ncols=num_cols, sharex=True, **subplots_kwargs)
+            axes_flat = axes.flat
+        else:
+            fig, axes = subplots(len(plotby_unique), 1, sharex=True, **subplots_kwargs)
+            if len(plotby_unique) == 1:
+                axes = [axes]
+            axes_flat = axes.flat
+            
         if log_bins:
-            axes[0].set_xscale('log')
+            if num_cols > 1:
+                # Set xscale for all axes in the first row
+                for ax in axes[0, :]:
+                    ax.set_xscale('log')
+            else:
+                axes[0].set_xscale('log')
         if colors is None:
             colors = it.cycle(sns.color_palette())
 
         color_iter = iter(colors) 
 
-        for unique_y, ax in zip(plotby_unique, axes.flat):
+        for unique_y, ax in zip(plotby_unique, axes_flat):
             if self.hue:
                 hue_values = list(self.data[unique_y].keys())
                 hue_colors = [next(color_iter) for _ in hue_values]
@@ -1435,7 +1505,7 @@ class Ridge:
             # coords = {'bottom': 0.1, 'left': 0.1, 'top': 0.9, 'right': 0.9, 'center': 0.5}
             # va, ha = label_pos.split('_')
 
-            axis_elements_color = 'k' if self.hue else c
+            axis_elements_color = default_tick_color if self.hue else c
 
             # ax.text(coords[ha], coords[va], '\n'.join(labels), transform=ax.transAxes,
             #         ha=ha, va=va, color=plot_colors, fontweight='bold')

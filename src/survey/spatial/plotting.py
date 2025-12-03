@@ -157,6 +157,7 @@ def arrplot(mdata: md.MuData,
             borders: bool = False,
             walls: bool = False,
             wells: Optional[Union[Dict, pd.Series, Callable]] = None,
+            plot: bool = True,
             return_welldata: bool = False,
             thresh: Optional[Number] = None,
             layer: Optional[str] = None,
@@ -198,6 +199,8 @@ def arrplot(mdata: md.MuData,
     wells : dict, pd.Series, or callable, optional
         How to color the wells. Can be a dictionary mapping well IDs to colors,
         a Series, or a function to apply to numeric `color` data.
+    plot : bool, default True
+        If True, perform plotting. Useful for obtaining well-level data without plotting.
     return_welldata : bool, default False
         If True, returns the computed well-level data that was plotted, along with the Axes.
     thresh : Number, optional
@@ -225,12 +228,18 @@ def arrplot(mdata: md.MuData,
 
     Returns
     -------
-    plt.Axes
-        The Axes object containing the plot.
-    """
+    ax (if `plot` and not `return_welldata`)
+    ax, welldata (if `plot` and `return_welldata`)
+    welldata (if not `plot` and `return_welldata`)
     
+    ax, (plt.Axes)
+        The Axes object containing the plot.
+    welldata (pd.DataFrame)
+        The well-level data that was plotted.
+    """
+
     def _add_img(ax, chip, img, lims, units):
-        
+
         img_arg_is_valid = isinstance(img, tuple) and len(img) == 2 and isinstance(img[0], Path) and isinstance(img[1], int)
         if not img_arg_is_valid:
             raise ValueError("Param `img` must be a tuple of (img_prefix: Path, idx: int).")
@@ -370,6 +379,9 @@ def arrplot(mdata: md.MuData,
         else:
             raise ValueError('Param `wells` must be a callable function, a dict, or a pd.Series')
         return ax, wells
+
+    if not plot and not return_welldata:
+        raise ValueError("Specify at least one of `plot` or `return_welldata` as True.")
     
     # Get configs
     configs = get_plotting_configs(
@@ -430,21 +442,24 @@ def arrplot(mdata: md.MuData,
     elif not isinstance(cmap, mpl.colors.Colormap):
         raise ValueError("Param `cmap` must be a valid matplotlib colormap instance.")
 
-    # Add all the requested elements to the plot
-    if img is not None:
-        ax = _add_img(ax, chip, img, lims, units)
+    # Add all the requested elements to the plot if plotting is enabled
+    if plot:
+        if img is not None:
+            ax = _add_img(ax, chip, img, lims, units)
 
-    if borders:
-        ax = _add_borders(borders, chip, ax, lerper)
+        if borders:
+            ax = _add_borders(borders, chip, ax, lerper)
 
-    if walls:
-        ax = _add_walls(walls, chip, ax, lerper)
+        if walls:
+            ax = _add_walls(walls, chip, ax, lerper)
 
     if wells is not None:
         ax, welldata = _add_wells(masked_mdata, wells, thresh, chip, ax, 
                                   cmap, norm, color, layer, lims, dtypes, 
                                   cbar, plot_label, configs, lerper)
-
+    if not plot:
+        return welldata
+    
     # Clean up the plot, make similar to svc.pl.scatter
     if invert:
         ax.set_facecolor('black')
@@ -815,6 +830,7 @@ def segplot(mdata: md.MuData,
             group: str,
             chipnum: Optional[Union[int, List[int]]] = None,
             label_positions: Optional[Union[bool, List[str]]] = None,
+            plot_label_params: Optional[Dict[str, Any]] = None,
             ax: Optional[plt.Axes] = None,
             fss: int = 10,
             ar: int = 1,
@@ -838,6 +854,8 @@ def segplot(mdata: md.MuData,
     label_positions : bool or list of str, optional
         Positions for placing chip number and group labels on the plot.
         If False, no labels are shown. If None, defaults to ['upper left', 'upper right'].
+    plot_label_params : dict, optional
+        Parameters for the plot labels, passed to `decorate_scatter`.
     ax : plt.Axes or list of plt.Axes, optional
         An existing Axes or list of Axes to plot on.
     fss : int, default 10
@@ -847,7 +865,7 @@ def segplot(mdata: md.MuData,
         Aspect ratio for the plots, fed directly to `survey.genplot.subplots` if
         `ax` is not provided. 
     **kwargs
-        Additional keyword arguments passed to `arrplot`.
+        Additional keyword arguments (not including plot_label_params) passed to `arrplot`.
 
     Returns
     -------
@@ -922,8 +940,10 @@ def segplot(mdata: md.MuData,
 
         for label, position in zip([chipnum, group], label_positions):
             pos, ha, va = get_text_position_vals(position)
-            plot_label_params = get_add_plotlabel_pm().get_params({'pos': pos, 'ha': ha, 'va': va})
-            ax = decorate_scatter(ax, config=plot_label_params, plot_type='plot_label', label=label)
+            default_config = {'pos': pos, 'ha': ha, 'va': va}
+            plot_label_config = get_config(plot_label_params, default_config, protected={'pos', 'ha', 'va'})
+            input_plot_label_params = get_add_plotlabel_pm().get_params(plot_label_config)
+            ax = decorate_scatter(ax, config=input_plot_label_params, plot_type='plot_label', label=label)
         
         for label, position in zip([chipnum, group], label_positions):
             legend_params = get_add_legend_pm().get_params(legend_params)
