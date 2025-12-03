@@ -115,34 +115,56 @@ def detect_cellranger_run(path_to_outs: Union[str, Path]) -> bool:
     ValueError
         If the directory structure does not clearly match 'multi' or 'count',
         or if key files are missing.
+
+    Notes
+    -----
+
+    This function is designed to detect the cellranger run type based on the files and
+    directories that are present only when syncing the "typically necessary" files for
+    downstream analysis, usually done with:
+
+    ```
+    aws s3 sync s3://${bucket}/path/to/exp/ ./ 
+        --exclude "*" 
+        --include "*filtered_feature_bc_matrix/barcodes.tsv.gz" 
+        --include "*raw_feature_bc_matrix.h5" 
+        --include "*web_summary.html" 
+        --include "*metrics_summary.csv"
+    ```
+
+    Cell Ranger v8 and v10 have different expected files for 'multi' runs. In v8,
+    the outs folder only contained either the 'multi' directory or 'per_sample_outs'.
+    In v10, 'multi' _may_ be absent (have not tested to confirm this is always the case).
     """
 
-    cellranger_multi_files = ['multi', 'per_sample_outs']
-    cellranger_count_files = ['raw_feature_bc_matrix.h5', 'filtered_feature_bc_matrix']
+    cellranger_v8_multi_files = ['multi', 'per_sample_outs']
+    cellranger_v10_multi_files = ['per_sample_outs', 'filtered_feature_bc_matrix', 'raw_feature_bc_matrix.h5']
+    cellranger_count_files = ['raw_feature_bc_matrix.h5', 'filtered_feature_bc_matrix', 'metrics_summary.csv', 'web_summary.html']
 
     in_outs = os.listdir(path_to_outs)
 
-    if all([i in in_outs for i in cellranger_multi_files]):
+    all_v8 = all([i in in_outs for i in cellranger_v8_multi_files])
+    all_v10 = all([i in in_outs for i in cellranger_v10_multi_files])
+
+    if all_v8:
         multi_run = True
-    elif any([i in in_outs for i in cellranger_multi_files]):
-        raise ValueError(
-            f"One of the cellranger multi files is missing at {path_to_outs}. "
-            "Expected files/dir: " + ', '.join(cellranger_multi_files) + ". "
-            "Cannot determine cellranger run type. Please make sure all files are present and "
-            "no other directories were mistakenly synced.")
-    elif all([i in in_outs for i in cellranger_count_files]):
+        crv10 = False
+    elif all_v10:
+        multi_run = True
+        crv10 = True
+    elif all([i in in_outs for i in cellranger_count_files]): # this must come last to avoid mis-classifying v10 multi as count
         multi_run = False
-    elif any([i in in_outs for i in cellranger_count_files]):
-        raise ValueError(
-            f"One of the cellranger count files is missing at {path_to_outs}. "
-            "Expected files/dir: " + ', '.join(cellranger_count_files) + ". "
-            "Cannot determine cellranger run type.")
+        crv10 = False
     else:
         raise ValueError(
-            f"Neither cellranger multi nor cellranger count files were found at {path_to_outs}. "
-            "Expected files/dir: " + ', '.join(cellranger_multi_files + cellranger_count_files) + ". "
-            "Cannot determine cellranger run type.")
-    return multi_run
+            f"Could not determine if Cell Ranger run at {path_to_outs} is 'multi' or 'count'. "
+            "Expected files for 'multi' or 'count' runs were not found. "
+            "Expected files/dirs in /path/to/cr_out/outs/ must be exactly:\n"
+            f"  For 'multi' (v8): {cellranger_v8_multi_files}\n"
+            f"  For 'multi' (v10): {cellranger_v10_multi_files}\n"
+            f"  For 'count': {cellranger_count_files}\n"
+        )
+    return multi_run, crv10
 
 
 def is_multi_run_multiplexed(id: str, 
@@ -256,7 +278,7 @@ class CellrangerOutdir:
         if not path_to_outs.exists():
             raise ValueError(f"Expected 'outs' directory in {path_to_crout}, but it was not found.")
         
-        self.multi_run = detect_cellranger_run(path_to_outs)
+        self.multi_run, self.crv10 = detect_cellranger_run(path_to_outs)
 
         self.paths = {}
 
@@ -268,12 +290,18 @@ class CellrangerOutdir:
             
         
         if self.multi_run:
-            raw_h5_path = path_to_crout / 'outs/multi/count/raw_feature_bc_matrix.h5'
+            if not self.crv10:
+                raw_h5_path = path_to_crout / 'outs/multi/count/raw_feature_bc_matrix.h5'
+            else:
+                raw_h5_path = path_to_crout / 'outs/raw_feature_bc_matrix.h5'
             self.raw_h5_path = raw_h5_path
 
             if not self.multiplexed:
                 self.paths[self.sampletag] = {}
-                filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{self.id}/count/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
+                if not self.crv10:
+                    filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{self.id}/count/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
+                else:
+                    filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{self.id}/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
                 # self.paths[self.sampletag]['raw_h5'] = raw_h5_path
                 self.paths[self.sampletag]['filtered_bcs'] = filtered_bcs_path
 
@@ -284,7 +312,10 @@ class CellrangerOutdir:
             else:
                 for sample in self.multiplexed_samples:
                     self.paths[sample] = {}
-                    filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{sample}/count/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
+                    if not self.crv10:
+                        filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{sample}/count/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
+                    else:
+                        filtered_bcs_path = path_to_crout / f'outs/per_sample_outs/{sample}/sample_filtered_feature_bc_matrix/barcodes.tsv.gz'
                     # self.paths[sample]['raw_h5'] = raw_h5_path
                     self.paths[sample]['filtered_bcs'] = filtered_bcs_path
                     
