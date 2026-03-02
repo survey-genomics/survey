@@ -4,6 +4,8 @@ from typing import (
     Union, List, Optional, Dict, Tuple, Any
 )
 import warnings
+import re
+import json
 
 # Standard libs
 import numpy as np
@@ -20,6 +22,8 @@ import mudata as md
 from anytree import Node, RenderTree
 from anytree.exporter import DictExporter
 from anytree.importer import DictImporter
+from bs4 import BeautifulSoup
+import requests
 
 # Survey libs
 from survey.genplot import subplots
@@ -1517,3 +1521,183 @@ class Annotate:
                 adata.obs[ct_col] = adata.obs[key].astype(str).map(mapper).astype('category')
             print(f"Annotations for key '{key}' imported and applied.")
 
+
+def get_hpa_single_cell_data(
+    genes: Union[str, List[str]],
+    tissues: Union[str, List[str]] = 'liver',
+    verbosity: int = 0
+) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    """
+    Query the Human Protein Atlas for single-cell expression data.
+    
+    Retrieves single-cell gene expression data from the Human Protein Atlas
+    for specified genes and tissues. Returns data as a DataFrame with genes
+    as rows and cell types as columns organized by legend and label.
+    
+    Parameters
+    ----------
+    genes : str or list of str
+        Gene symbol(s) to query. Can be mouse or human genes (automatically
+        converted to uppercase for querying).
+    tissues : str or list of str, optional
+        Tissue(s) to query. If a list is provided, returns a dictionary of
+        DataFrames, one per tissue. Default is 'liver'.
+    verbosity : int, optional
+        Controls output verbosity. 0 = silent except errors, 1 = print status
+        messages. Default is 0.
+    
+    Returns
+    -------
+    pd.DataFrame or dict of pd.DataFrame
+        If `tissues` is a string: Returns a DataFrame with genes as rows and
+        a MultiIndex column structure (legend, label) containing expression
+        values.
+        If `tissues` is a list: Returns a dictionary where keys are tissue
+        names and values are DataFrames as described above.
+    
+    Examples
+    --------
+    >>> # Query single gene and tissue
+    >>> df = get_hpa_single_cell_data('TP53', tissue='liver')
+    
+    >>> # Query multiple genes
+    >>> df = get_hpa_single_cell_data(['TP53', 'BRCA1'], tissue='liver')
+    
+    >>> # Query multiple tissues
+    >>> results = get_hpa_single_cell_data(['TP53', 'BRCA1'], 
+    ...                                      tissues=['liver', 'kidney'])
+    >>> liver_df = results['liver']
+    
+    Notes
+    -----
+    Gene symbols are automatically converted to uppercase to handle both
+    mouse and human gene nomenclature. The function uses the HPA API to
+    resolve gene symbols to Ensembl IDs before scraping tissue-specific
+    single-cell data.
+    """
+    # Normalize inputs
+    if isinstance(genes, str):
+        genes = [genes]
+    genes = [gene.upper() for gene in genes]
+    
+    if isinstance(tissues, str):
+        tissues = [tissues]
+        return_dict = False
+    else:
+        return_dict = True
+    
+    api_url = "https://www.proteinatlas.org/api/search_download.php"
+    results = {}
+    
+    # Process each tissue
+    for tissue in tissues:
+        tissue_data = {}
+        
+        for gene in genes:
+            if verbosity >= 1:
+                print(f"Processing {gene} for {tissue}...")
+            
+            # Step 1: Query API for Ensembl ID
+            params = {
+                'search': gene,
+                'format': 'json',
+                'columns': 'g,eg',
+                'compress': 'no'
+            }
+            
+            try:
+                api_resp = requests.get(api_url, params=params)
+                
+                if api_resp.status_code == 400:
+                    if verbosity >= 1:
+                        print(f"Bad request for {gene}. Skipping.")
+                    continue
+                elif api_resp.status_code == 500:
+                    if verbosity >= 1:
+                        print(f"Server error for {gene}. Skipping.")
+                    continue
+                
+                api_resp.raise_for_status()
+                data = api_resp.json()
+                
+                if not data:
+                    if verbosity >= 1:
+                        print(f"No match found in HPA for gene: {gene}")
+                    continue
+                
+                top_match = data[0]
+                gene_symbol = top_match.get('Gene', top_match.get('g'))
+                ensembl_id = top_match.get('Ensembl', top_match.get('eg'))
+                
+                if not gene_symbol or not ensembl_id:
+                    if verbosity >= 1:
+                        print(f"Could not extract IDs for {gene}")
+                    continue
+                
+                # Step 2: Fetch and parse HTML
+                target_url = f"https://www.proteinatlas.org/{ensembl_id}-{gene_symbol}/single+cell/{tissue}"
+                html_resp = requests.get(target_url)
+                html_resp.raise_for_status()
+                
+                soup = BeautifulSoup(html_resp.text, 'html.parser')
+                
+                # Step 3: Extract barChart data
+                target_script = None
+                for script in soup.find_all('script'):
+                    if script.string and "$('#sc_detail_summary').barChart([" in script.string:
+                        target_script = script.string
+                        break
+                
+                if not target_script:
+                    if verbosity >= 1:
+                        print(f"Could not find barChart data for {gene} in {tissue}")
+                    continue
+                
+                match = re.search(r"\$\('#sc_detail_summary'\)\.barChart\((\[.*?\])[,)]", target_script)
+                
+                if not match:
+                    if verbosity >= 1:
+                        print(f"Could not parse barChart data for {gene} in {tissue}")
+                    continue
+                
+                json_string = match.group(1)
+                data_list = json.loads(json_string)
+                
+                # Step 4: Process data for this gene
+                gene_data = {}
+                for item in data_list:
+                    legend = item.get('legend', '')
+                    label = item.get('label', '')
+                    value = item.get('value', 0)
+                    gene_data[(legend, label)] = value
+                
+                tissue_data[gene_symbol] = gene_data
+                
+                if verbosity >= 1:
+                    print(f"Successfully processed {gene_symbol} ({ensembl_id}) for {tissue}")
+                
+            except requests.exceptions.RequestException as e:
+                if verbosity >= 1:
+                    print(f"Network error for {gene}: {e}")
+                continue
+            except json.JSONDecodeError as e:
+                if verbosity >= 1:
+                    print(f"JSON parsing error for {gene}: {e}")
+                continue
+        
+        # Convert tissue data to DataFrame
+        if tissue_data:
+            df = pd.DataFrame.from_dict(tissue_data, orient='index')
+            df.columns = pd.MultiIndex.from_tuples(df.columns, names=['legend', 'label'])
+            df.index.name = 'gene'
+            results[tissue] = df
+        else:
+            if verbosity >= 1:
+                print(f"No data retrieved for {tissue}")
+            results[tissue] = pd.DataFrame()
+    
+    # Return format based on input
+    if return_dict:
+        return results
+    else:
+        return results[tissues[0]]

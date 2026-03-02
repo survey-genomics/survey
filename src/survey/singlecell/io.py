@@ -138,7 +138,7 @@ def detect_cellranger_run(path_to_outs: Union[str, Path]) -> bool:
     """
 
     cellranger_v8_multi_files = ['multi', 'per_sample_outs']
-    cellranger_v10_multi_files = ['per_sample_outs', 'filtered_feature_bc_matrix', 'raw_feature_bc_matrix.h5']
+    cellranger_v10_multi_files = ['per_sample_outs', 'filtered_feature_bc_matrix', 'raw_feature_bc_matrix.h5', 'raw_feature_bc_matrix']
     cellranger_count_files = ['raw_feature_bc_matrix.h5', 'filtered_feature_bc_matrix', 'metrics_summary.csv', 'web_summary.html']
 
     in_outs = os.listdir(path_to_outs)

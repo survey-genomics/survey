@@ -603,5 +603,86 @@ def set_tick_params(ax: mpl.axes.Axes,
     return ax
 
 
+def add_heatmap_frames(ax, mask, color='cyan', linewidth=2):
+    """
+    Add rectangular frames around True values in a boolean mask on a seaborn heatmap.
+    
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The axes object containing the heatmap.
+    mask : np.ndarray or pd.DataFrame
+        Boolean mask with same shape as heatmap data.
+        Frames will be drawn around True values.
+    color : str, default='cyan'
+        Color of the frame lines.
+    linewidth : float, default=2
+        Width of the frame lines.
+    """
+    
+    # Convert to numpy array if DataFrame
+    if hasattr(mask, 'values'):
+        mask = mask.values
+    
+    # Find contiguous regions
+    rows, cols = np.where(mask)
+    
+    if len(rows) == 0:
+        return
+    
+    # Add rectangles around each True cell
+    for i, j in zip(rows, cols):
+        rect = mpl.patches.Rectangle((j, i), 1, 1, fill=False, 
+                                     edgecolor=color, linewidth=linewidth)
+        ax.add_patch(rect)
+    
+    return ax
 
+def create_alpha_cmap(base_cmap, alpha=None, scale_alpha=False):
+    """
+    Create a colormap with specified alpha transparency.
 
+    Parameters
+    ----------
+    base_cmap : str or matplotlib.colors.Colormap
+        Either a colormap name or a colormap instance to transform.
+    alpha : float, optional
+        Fixed alpha value (0 to 1) to apply to the entire colormap.
+    scale_alpha : bool, default False
+        If True, alpha scales linearly from 0 to 1 across the colormap range.
+
+    Returns
+    -------
+    matplotlib.colors.LinearSegmentedColormap
+        The new colormap instance with transparency enabled.
+
+    Raises
+    ------
+    ValueError
+        If neither `alpha` is provided nor `scale_alpha` is set to True.
+    """
+    """Create a colormap with specified alpha transparency.
+    
+    Args:
+        base_cmap: Either a colormap name (str) or a colormap instance
+        alpha: Fixed alpha value to apply (float between 0-1)
+        scale_alpha: If True, scale alpha from 0 to 1 across the colormap
+    """
+    if alpha is None and not scale_alpha:
+        raise ValueError("Either alpha must be provided or scale_alpha must be True.")
+    
+    # Handle both string names and colormap instances
+    if isinstance(base_cmap, str):
+        original_cmap = mpl.colormaps.get_cmap(base_cmap)
+        cmap_name = base_cmap
+    else:
+        original_cmap = base_cmap
+        cmap_name = getattr(base_cmap, 'name', 'custom')
+    
+    colors = original_cmap(np.linspace(0, 1, 256))
+    if not scale_alpha:
+        colors[:, -1] = alpha  # Set alpha channel
+    else:
+        colors[:, -1] = np.linspace(0, 1.0, 256)
+    
+    return mpl.colors.LinearSegmentedColormap.from_list(f'{cmap_name}_alpha', colors)
