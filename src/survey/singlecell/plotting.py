@@ -1434,7 +1434,7 @@ class Ridge:
         else:
             fig, axes = subplots(len(plotby_unique), 1, sharex=True, **subplots_kwargs)
             if len(plotby_unique) == 1:
-                axes = [axes]
+                axes = np.array([axes])
             axes_flat = axes.flat
             
         if log_bins:

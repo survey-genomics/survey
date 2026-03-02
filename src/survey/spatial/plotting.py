@@ -10,22 +10,28 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
+from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+from scipy import ndimage
+from scipy.sparse import csr_matrix
+from scipy.ndimage import gaussian_filter
+from multiprocessing import Pool
 
 # Single-cell libs
 import mudata as md
 
 # Survey libs
-from survey.singlecell.plotting import scatter, get_plot_data, get_plotting_configs
+from survey.singlecell.plotting import scatter, get_plot_data, get_plotting_configs, Ridge
 from survey.singlecell.decorate import (
-    decorate_scatter, get_add_legend_pm, 
+    decorate_scatter, get_add_legend_pm, get_pm,
     get_text_position_vals, get_add_plotlabel_pm
 )
+from survey.singlecell.obs import get_obs_df
 from survey.singlecell.datatypes import determine_data
 from survey.spatial.core import validate_chipnums, validate_spatial_mdata
 from survey.genutils import get_config, get_mask, is_listlike, normalize
-from survey.genplot import subplots
+from survey.genplot import subplots, create_alpha_cmap
 from survey.singlecell.meta import get_cat_dict
 from survey.spatial.segutils import get_seg_keys
 
@@ -157,6 +163,7 @@ def arrplot(mdata: md.MuData,
             borders: bool = False,
             walls: bool = False,
             wells: Optional[Union[Dict, pd.Series, Callable]] = None,
+            dilation: Optional[Number] = None,
             plot: bool = True,
             return_welldata: bool = False,
             thresh: Optional[Number] = None,
@@ -199,6 +206,8 @@ def arrplot(mdata: md.MuData,
     wells : dict, pd.Series, or callable, optional
         How to color the wells. Can be a dictionary mapping well IDs to colors,
         a Series, or a function to apply to numeric `color` data.
+    dilation : Number, optional
+        A percentage to dilate (>100) or shrink (<100) the well squares.
     plot : bool, default True
         If True, perform plotting. Useful for obtaining well-level data without plotting.
     return_welldata : bool, default False
@@ -316,7 +325,8 @@ def arrplot(mdata: md.MuData,
         return ax
     
 
-    def _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, layer, lims, dtypes, cbar, plot_label, configs, lerper):
+    def _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, 
+                   layer, lims, dtypes, cbar, plot_label, configs, lerper, dilation):
 
         center = [np.mean(v) for k, v in lims.items()]
 
@@ -363,7 +373,10 @@ def arrplot(mdata: md.MuData,
                                  "colors or mappable to colors.")
             
             verts = {id: [lerper(p) for p in v] for id, v in chip.array.verts.items() if id in wells.index}
-                
+
+            if dilation is not None:
+                verts = resize_square_vertices(verts, dilation)
+
             for id, fc in well_colors.items():
                 poly = mpl.patches.Polygon(verts[id], closed=True, facecolor=fc,
                                            edgecolor=None, linewidth=0)
@@ -403,6 +416,7 @@ def arrplot(mdata: md.MuData,
 
     chip, masked_mdata = get_chip_mdata(mdata, chipnum, subset=subset)
 
+    # Handle units and lerper setup
     if units == 'm':
         lims = chip.array.lims
         def lerper(p):
@@ -456,7 +470,7 @@ def arrplot(mdata: md.MuData,
     if wells is not None:
         ax, welldata = _add_wells(masked_mdata, wells, thresh, chip, ax, 
                                   cmap, norm, color, layer, lims, dtypes, 
-                                  cbar, plot_label, configs, lerper)
+                                  cbar, plot_label, configs, lerper, dilation)
     if not plot:
         return welldata
     
@@ -608,6 +622,462 @@ def cellmap(mdata: md.MuData,
     return ax
 
 
+def resize_square_vertices(verts_dict, scale_percent):
+    """
+    Resize square vertices by a given percentage while maintaining center position.
+    
+    Parameters
+    ----------
+    verts_dict : dict
+        Dictionary where values are square vertices in order:
+        [top_right, bottom_right, bottom_left, top_left]
+        Each vertex should be a tuple/list of (x, y) coordinates
+    scale_percent : float
+        Percentage to scale each side (e.g., 110 = 110% of original size,
+        90 = 90% of original size)
+        
+    Returns
+    -------
+    dict
+        Dictionary with same keys but resized vertices
+    """
+    
+    scale_factor = scale_percent / 100.0
+    resized_dict = {}
+    
+    for key, verts in verts_dict.items():
+        verts = np.array(verts)
+        
+        # Calculate center of the square
+        center = verts.mean(axis=0)
+        
+        # Translate vertices to origin, scale, then translate back
+        centered_verts = verts - center
+        scaled_verts = centered_verts * scale_factor
+        resized_verts = scaled_verts + center
+        
+        resized_dict[key] = resized_verts
+    
+    return resized_dict
+
+
+class Reinforcement:
+    """
+    A reaction-diffusion model for generating organic-looking patterns.
+    
+    This class implements a reinforcement-based pattern formation algorithm
+    using partial differential equations and diffusion processes.
+
+    Based on the model described in MALHEIROS, FENSTERSEIFER, and WALTER (2020):
+    https://mgmalheiros.github.io/research/leopard/leopard-2020-preprint.pdf
+    https://github.com/CorentinDumery/cow-tex-generator/tree/main
+    
+    Parameters
+    ----------
+    shape : int or tuple of int, default=50
+        Initial shape of the simulation grid. If int, creates a square grid.
+    speed : int, default=100
+        Simulation speed parameter affecting time step size.
+    ini_c : float, default=3
+        Initial concentration value for the grid.
+    var_c : float, default=2
+        Variance added to initial concentration (0 for uniform).
+    scale : float, default=1
+        Scaling factor for the Laplacian term in the model.
+    seed : int, optional
+        Random seed for reproducibility. If None, results are non-deterministic.
+    
+    Attributes
+    ----------
+    width : float
+        Width parameter for the threshold calculation.
+    scale : float
+        Scaling factor for the diffusion term.
+    shape : tuple of int
+        Current shape of the simulation grid.
+    delta_t : float
+        Time step size for the simulation.
+    c_reg : ndarray
+        Concentration field array.
+    lap_c : ndarray
+        Laplacian of concentration field (workspace array).
+    """
+    def __init__(self, shape=50, speed=100, ini_c=3, var_c=2, scale=1, seed=None):
+        self.width = 1
+        self.scale = scale
+        self.shape = shape
+        self.delta_t = 0.01 * speed / 100
+        
+        # Only set the global seed if one is explicitly provided
+        if seed is not None:
+            np.random.seed(seed)
+
+        if isinstance(self.shape, int): self.shape = (self.shape, self.shape)
+
+        self.c_reg = np.full(self.shape, ini_c, dtype=float)
+        if var_c != 0: 
+            self.c_reg += np.random.random_sample(self.shape) * var_c
+
+        self.lap_c = np.empty_like(self.c_reg)
+
+    def reinforcement_model(self, g):
+        """
+        Execute one time step of the reinforcement diffusion model.
+        
+        Parameters
+        ----------
+        g : float
+            Gamma parameter controlling reaction strength.
+        """
+        kernel_c = np.array([[1, 4, 1], [4, -20, 4], [1, 4, 1]]) / 6
+        threshold = 1
+        mc = self.c_reg
+        wrap = True
+
+        if wrap: 
+            ndimage.convolve(mc, kernel_c, output=self.lap_c, mode='wrap')
+        else:    
+            ndimage.convolve(mc, kernel_c, output=self.lap_c, mode='reflect')
+
+        self.c_reg = mc + ((threshold - self.width - mc) * (threshold - mc) * (threshold + self.width - mc) * g + self.scale * self.lap_c) * self.delta_t
+
+    def load_c(self, c):
+        """
+        Load a pre-existing concentration field into the model.
+        
+        Parameters
+        ----------
+        c : ndarray
+            Concentration field array to load.
+        """
+        self.c_reg = c
+
+    def run_simulation(self, start, stop, increasing_size=False):
+        """
+        Run the simulation for a specified number of iterations.
+        
+        Parameters
+        ----------
+        start : int
+            Starting iteration number.
+        stop : int
+            Final iteration number (inclusive).
+        increasing_size : bool, default=False
+            If True, periodically grows the grid size during simulation.
+        """
+        gamma = 3 * np.sqrt(3) / (2 * self.width * self.width)
+        
+        for iteration in range(start + 1, stop + 1):
+            if increasing_size: 
+                if iteration % 50 == 1:
+                    self.grow_one_row_c()
+                    self.grow_one_col_c()
+
+            if (self.c_reg).shape != self.shape:
+                self.shape = self.c_reg.shape
+                self.lap_c = np.empty_like(self.c_reg)
+            
+            self.reinforcement_model(gamma)
+
+    def grow_one_row_c(self):
+        """
+        Add one row to the concentration field by duplicating random rows.
+        
+        This method inserts a new row by randomly selecting and duplicating
+        existing rows, with bias toward avoiding the center region.
+        """
+        rows, cols = self.c_reg.shape
+        new_c = np.zeros((rows + 1, cols))
+        new_c[:rows,:] = self.c_reg[:,:]
+        for col in range(0, cols):
+            row = np.random.randint(0, rows)
+            if 0.45 * rows <= row <= 0.55 * rows:
+                if np.random.random() < 0.5:
+                    row = np.random.randint(0, rows)
+            new_c[(row+1):(rows+1), col] = self.c_reg[row:rows, col]
+        self.c_reg = new_c
+
+    def grow_one_col_c(self):
+        """
+        Add one column to the concentration field by duplicating random columns.
+        
+        This method inserts a new column by randomly selecting and duplicating
+        existing columns at random positions.
+        """
+        rows, cols = self.c_reg.shape
+        new_c = np.zeros((rows, cols + 1))
+        new_c[:,:cols] = self.c_reg[:,:]        
+        for row in range(0, rows):
+            col = np.random.randint(0, cols)
+            new_c[row, (col+1):(cols+1)] = self.c_reg[row, col:cols]
+        self.c_reg = new_c
+
+    def getC(self):
+        """
+        Get the current concentration field.
+        
+        Returns
+        -------
+        ndarray
+            Current concentration field array.
+        """
+        return self.c_reg
+
+
+def _process_single_pattern(args):
+    """
+    Helper function for parallel processing of cow patterns.
+    
+    Parameters
+    ----------
+    args : tuple
+        Packed arguments containing:
+        - idx : int
+            Index of the pattern in the batch
+        - props : tuple of float
+            Proportion values for each color segment
+        - shape : int or tuple
+            Initial grid shape
+        - speed : int
+            Simulation speed parameter
+        - ini_c : float
+            Initial concentration value
+        - var_c : float
+            Concentration variance
+        - scale : float
+            Diffusion scaling factor
+        - seed : int or None
+            Base random seed
+        - bisection_strength : float
+            Strength of noise perturbation
+        - rgb_palette : ndarray
+            Array of RGB color tuples
+        - total : int
+            Total number of patterns being generated
+    
+    Returns
+    -------
+    rgb_image : ndarray
+        RGB image array with shape (height, width, 3).
+    indices : ndarray
+        Integer array indicating segment indices for each pixel.
+    """
+    idx, props, shape, speed, ini_c, var_c, scale, seed, bisection_strength, rgb_palette, total, verbose = args
+    
+    if verbose:
+        print(f"Starting pattern {idx + 1}/{total}...")
+    
+    pattern_seed = seed + idx if seed is not None else None
+    
+    # 1. Run the simulation for this pattern
+    cow_tex = Reinforcement(shape=shape, speed=speed, ini_c=ini_c, var_c=var_c, scale=scale, seed=pattern_seed)
+    
+    # Standard burn-in and growth phases
+    cow_tex.run_simulation(0, 100)
+    cow_tex.run_simulation(0, 1000, increasing_size=True)
+
+    raw_c = cow_tex.getC()
+    
+    # Smooth results to remove simulation artifacts
+    pattern = gaussian_filter(raw_c, sigma=1.1)
+
+    # 2. Prepare the Perturbation Map (The "Bisection" Logic)
+    if bisection_strength > 0:
+        noise = np.random.random(pattern.shape)
+        smooth_noise = gaussian_filter(noise, sigma=pattern.shape[0] / 20) 
+        
+        # Normalize both signals
+        smooth_noise = (smooth_noise - smooth_noise.mean()) / smooth_noise.std()
+        pattern_norm = (pattern - pattern.mean()) / pattern.std()
+        
+        mixed_signal = pattern_norm + (smooth_noise * bisection_strength)
+    else:
+        mixed_signal = pattern
+
+    # 3. Verify proportions
+    if not np.isclose(sum(props), 1.0):
+        props = np.array(props) / np.sum(props)
+    
+    # Calculate percentiles based on cumulative proportions
+    cum_props = np.clip(np.cumsum(props)[:-1], 0, 1)
+    threshold_values = np.percentile(mixed_signal, cum_props * 100)
+    
+    # Digitize creates an integer map (0, 1, 2...) based on thresholds
+    indices = np.digitize(mixed_signal, threshold_values)
+    
+    # Map integer indices to RGB colors
+    rgb_image = rgb_palette[indices]
+    
+    if verbose:
+        print(f"Pattern {idx + 1}/{total} completed.")
+    
+    return rgb_image, indices
+
+
+def generate_cow_patterns(
+    shape=500,
+    proportion_sets=[(0.5, 0.5)],
+    colors=['black', 'white'],
+    bisection_strength=1.2,
+    seed=None,
+    speed=200, 
+    scale=5,
+    ini_c=0, 
+    var_c=2,
+    return_segments=False,
+    n_proc=1,
+    verbose=False
+):
+    """
+    Generate reaction-diffusion patterns segmented into specified color proportions.
+    
+    This function creates organic-looking patterns using a reaction-diffusion model,
+    then segments them into regions with specified color proportions.
+    
+    Parameters
+    ----------
+    shape : int or tuple of int, default=500
+        Initial shape of the simulation grid.
+    proportion_sets : list of tuple of float, default=[(0.5, 0.5)]
+        List where each tuple represents desired proportions for each color.
+        Example: [(0.5, 0.5), (0.3, 0.3, 0.4)] creates two patterns.
+    colors : list of str, default=['black', 'white']
+        Color names to use for segments. Must be at least as long as the
+        longest tuple in proportion_sets. Accepts matplotlib color names.
+    bisection_strength : float, default=1.2
+        Controls pattern irregularity. 0.0 produces concentric patterns,
+        values >0.5 create irregular bisecting/patchwork patterns.
+    seed : int, optional
+        Base random seed for reproducibility. If None, results are random.
+        Each pattern uses seed + index for independent randomness.
+    speed : int, default=200
+        Simulation speed parameter affecting convergence rate.
+    scale : float, default=5
+        Scaling factor for diffusion term in the model.
+    ini_c : float, default=0
+        Initial concentration value for the simulation grid.
+    var_c : float, default=2
+        Variance in initial concentration values.
+    return_segments : bool, default=False
+        If True, also return integer segment maps alongside RGB images.
+    n_proc : int, default=1
+        Number of processes for parallel execution. Use 1 for sequential.
+    verbose : bool, default=True
+        If True, print progress messages.
+    
+    Returns
+    -------
+    output_arrays : list of ndarray
+        List of RGB numpy arrays (images), one per tuple in proportion_sets.
+        Each array has shape (height, width, 3) with values in [0, 1].
+    segment_maps : list of ndarray, optional
+        Returned only if return_segments=True. List of integer arrays
+        indicating segment indices for each pixel.
+    
+    Examples
+    --------
+    >>> patterns = generate_cow_patterns(
+    ...     shape=200,
+    ...     proportion_sets=[(0.6, 0.4), (0.3, 0.3, 0.4)],
+    ...     colors=['red', 'blue', 'green'],
+    ...     seed=42
+    ... )
+    >>> len(patterns)
+    2
+    """
+    
+    # Pre-convert color names to RGB tuples (0-1 floats)
+    rgb_palette = np.array([mpl.colors.to_rgb(c) for c in colors])
+    
+    total = len(proportion_sets)
+    if verbose:
+        print(f"Generating {total} cow pattern(s) using {n_proc} process(es)...")
+
+    # Prepare arguments for parallel processing
+    task_args = [
+        (idx, props, shape, speed, ini_c, var_c, scale, seed, bisection_strength, rgb_palette, total, verbose)
+        for idx, props in enumerate(proportion_sets)
+    ]
+    
+    if n_proc > 1:
+        with Pool(processes=n_proc) as pool:
+            results = pool.map(_process_single_pattern, task_args)
+    else:
+        results = [_process_single_pattern(arg) for arg in task_args]
+    
+    if verbose:
+        print(f"All {total} pattern(s) completed successfully")
+    
+    # Unpack results
+    output_arrays = [r[0] for r in results]
+    segment_maps = [r[1] for r in results]
+    
+    if return_segments:
+        return output_arrays, segment_maps
+    else:
+        return output_arrays
+
+
+def consolidate_proportions(series_list, max_num=10, min_prop=0.01, reset_index=True):
+    """
+    Consolidate categories in proportion series based on max count and minimum proportion.
+    
+    Parameters:
+    -----------
+    series_list : list of pd.Series
+        List of Series where each represents proportions (values should sum to 1)
+    max_num : int
+        Maximum number of categories to keep before consolidating into "Other"
+    min_prop : float
+        Minimum proportion threshold; categories below this are consolidated into "Other"
+    reset_index : bool
+        If True, use integer index (0, 1, 2, ...) for rows. If False, preserve series names.
+    
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with consolidated categories as columns, transposed so each row represents one series
+    """
+    consolidated_list = []
+    
+    for i, series in enumerate(series_list):
+        # Sort by proportion in descending order
+        sorted_series = series.sort_values(ascending=False)
+        
+        # Identify categories to keep based on max_num
+        top_categories = sorted_series.iloc[:max_num]
+        
+        # Further filter by min_prop
+        keep_mask = top_categories >= min_prop
+        kept_categories = top_categories[keep_mask]
+        
+        # Calculate "Other" proportion
+        other_prop = 1.0 - kept_categories.sum()
+        
+        # Create consolidated series
+        if other_prop > 0:
+            consolidated = pd.concat([
+                kept_categories,
+                pd.Series({'Other': other_prop})
+            ])
+        else:
+            consolidated = kept_categories
+        
+        # Set series name based on reset_index parameter
+        if reset_index:
+            consolidated.name = i
+        else:
+            consolidated.name = series.name if series.name is not None else i
+        
+        consolidated_list.append(consolidated)
+    
+    # Concatenate into DataFrame, filling missing categories with 0
+    df = pd.concat(consolidated_list, axis=1).fillna(0)
+    
+    # Transpose so rows represent series and columns represent categories
+    return df.T
+
+
 def hoodmap(mdata: md.MuData,
             chipnum: int,
             color: Optional[str] = None,
@@ -616,6 +1086,13 @@ def hoodmap(mdata: md.MuData,
             fss: int = 10,
             units: str = 'w',
             invert: bool = False,
+            cow: bool = False,
+            cow_maxnum: int = 5,
+            cow_mincells: int = None,
+            cow_minprop: float = 0.1,
+            cow_cellmap_kwargs: Optional[Dict[str, Any]] = None,
+            dilation: Optional[Number] = None,
+            n_proc: int = 1,
             size: HoodMapCircleSize = None,
             wedgeprops: Optional[Dict[str, Any]] = None,
             circleprops: Optional[Dict[str, Any]] = None,
@@ -623,11 +1100,13 @@ def hoodmap(mdata: md.MuData,
             legend_params: Optional[Dict[str, Any]] = None,
             **kwargs: Any) -> plt.Axes:
     """
-    Plots neighborhood-level data on a spatial array plot using pie charts or circles.
+    Plots neighborhood-level data on a spatial array plot using pie charts, circles,
+    or cowprint style.
 
     This function visualizes aggregate information for each well (neighborhood),
-    such as the composition of cell types within the well, represented as pie charts.
-    The size of the pies or circles can be scaled by the number of cells in the well.
+    such as the composition of cell types within the well, represented as pie charts or
+    cowprint style. If no color is provided, only circles are plotted. For pies or circles, 
+    the size of the pies or circles can be scaled by the number of cells in the well.
 
     Parameters
     ----------
@@ -645,10 +1124,28 @@ def hoodmap(mdata: md.MuData,
     fss : int, default 10
         Figure size scale for the plot, fed directly to `survey.genplot.subplots` if 
         `ax` is not provided.
-    units : {'w'}, default 'w'
-        The units for the plot coordinates. Currently only 'w' (well units) is supported.
+    units : {'w', 'm'}, default 'w'
+        The units for the plot coordinates. 'w' for well units, 'm' for metric (microns).
+        Note: For pie/circle mode, only 'w' is supported. For cow mode, both are supported.
     invert : bool, default False
         If True, inverts the plot colors (e.g., for a dark background).
+    cow : bool, default False
+        If True, use a "cowprint" style for coloring wells. All other parameters related to 
+        pie charts and circles are ignored.
+    cow_mincells : int, default 5
+        Minimum number of cells in a well to apply cowprint coloring. Wells with fewer cells are
+        colored using cellmap.
+    cow_maxnum : int, default 5
+        Maximum number of categories to display in cowprint mode. Other categories are 
+        consolidated into "Other".
+    cow_minprop : float, default 0.1
+        Minimum proportion of the most abundant category to color a well in cowprint mode.
+    cow_cellmap_kwargs: dict, optional
+        Additional keyword arguments to pass to cellmap() for wells that don't meet cowprint criteria.
+    dilation : Number, optional
+        A percentage to dilate (>100) or shrink (<100) the well squares.
+    n_proc : int, default 1
+        Number of processes to use for generating cow patterns in parallel.
     size : float or dict, optional
         Controls the size of the pies/circles.
         - If a float, it's a fraction of the well size (0 to 1).
@@ -671,7 +1168,7 @@ def hoodmap(mdata: md.MuData,
     Raises
     ------
     NotImplementedError
-        If `units` is not 'w'.
+        If `units` is not 'w' for pie/circle mode.
     ValueError
         If `color` is not a categorical column, or if `size` parameters are invalid.
     """
@@ -685,6 +1182,8 @@ def hoodmap(mdata: md.MuData,
 
     basis = 'survey'
 
+    check_size = False # may remove the size checking code later if we decide to allow sizes > 1
+
     if invert:
         default_circle_color = 'white'
         default_circle_edge_color = 'white'
@@ -693,6 +1192,10 @@ def hoodmap(mdata: md.MuData,
         default_circle_edge_color = 'black'
 
     default_wedgeprops = {'edgecolor': default_circle_edge_color, 'linewidth': 0.5}
+
+    if cow_mincells is not None:
+        if not isinstance(cow_mincells, int) or cow_mincells < 0:
+            raise ValueError("Param `cow_mincells` must be a non-negative integer.")
 
     # Validate inputs
     validate_spatial_mdata(mdata)
@@ -704,18 +1207,31 @@ def hoodmap(mdata: md.MuData,
 
     chip, masked_mdata = get_chip_mdata(mdata, chipnum, subset=subset)
 
-    if units != 'w':
-        # Pies take too long to render in 'm' units, not sure why, something about the large coordinate values in 
-        # `center`. Instead, we convert to 'w' units internally and make other functions accept it as well.
-        # Eventually, this unit conversion should be built into the Array class (with get_lerper() function and
-        # related `lims` code in the individual plotting functions). Still choosing to leave the units param here 
-        # for consistency with other spatial plotting functions.
-        raise NotImplementedError("Only units='w' is currently supported in hoodmap().")
+    # Handle units and lerper setup
+    if cow:
+        # Cow mode supports both 'w' and 'm' units
+        if units == 'm':
+            lims = chip.array.lims
+            def lerper(p):
+                """An identity function that returns the input unchanged."""
+                return p
+        elif units == 'w':
+            xy = chip.array.wells[['x', 'y']]
+            wall_dist = (chip.array.w/chip.array.pitch)
+            half_well_dist = 0.5*(chip.array.s/chip.array.pitch)
+            lims = dict(zip(['x', 'y'], zip(xy.min() - half_well_dist - wall_dist, xy.max() + half_well_dist + wall_dist)))
+            lerper = get_lerper((chip.array.lims['x'], chip.array.lims['y']), (lims['x'], lims['y']))
+        else:
+            raise ValueError("Invalid units. Only 'm' or 'w' is supported.")
     else:
-        xy = chip.array.wells[['x', 'y']]
-        wall_dist = (chip.array.w/chip.array.pitch)
-        half_well_dist = 0.5*(chip.array.s/chip.array.pitch)
-        lims = dict(zip(['x', 'y'], zip(xy.min() - half_well_dist - wall_dist, xy.max() + half_well_dist + wall_dist)))
+        # Pie/circle mode only supports 'w' units
+        if units != 'w':
+            raise NotImplementedError("Only units='w' is currently supported in hoodmap() for pie/circle mode.")
+        else:
+            xy = chip.array.wells[['x', 'y']]
+            wall_dist = (chip.array.w/chip.array.pitch)
+            half_well_dist = 0.5*(chip.array.s/chip.array.pitch)
+            lims = dict(zip(['x', 'y'], zip(xy.min() - half_well_dist - wall_dist, xy.max() + half_well_dist + wall_dist)))
     
     # Get Axes object and set limits
     if ax is None:
@@ -729,6 +1245,8 @@ def hoodmap(mdata: md.MuData,
     if color is None:
         # User wants to plot only circles showing neighborhood size without pie charts
         plot_pies = False
+        if cow:
+            raise ValueError("Param `cow` cannot be True when `color` is None.")
         if not isinstance(size, dict):
             raise ValueError(
                 "If `color` is None, only neighborhood size is plotted. Therefore, "
@@ -741,6 +1259,18 @@ def hoodmap(mdata: md.MuData,
             circleprops = {'facecolor': default_circle_color, 'edgecolor': default_circle_edge_color, 'linewidth': 1}
     else:
         plot_pies = True
+
+    # Check for "Other" category conflict
+    if cow and color is not None:
+        dtypes = determine_data(masked_mdata, color=color, basis=basis)
+        if dtypes['color']['type'] != 'cat':
+            raise ValueError("Param `color` must be a categorical column for hoodmap() with cow=True.")
+        
+        color_mod = dtypes['color']['mod']
+        if 'Other' in masked_mdata[color_mod].obs[color].cat.categories:
+            raise ValueError(
+                "The color column contains a category named 'Other', which conflicts with "
+                "the consolidation process in cow mode. Please rename this category before using cow=True.")
 
     df1 = chip.get_welldata()[['arr-x', 'arr-y']]
     if color is None:
@@ -756,7 +1286,8 @@ def hoodmap(mdata: md.MuData,
         sizes = pd.Series(circlesize, index=df2.index) 
     else:
         if isinstance(size, Number):
-            _check_size(size)
+            if check_size:
+                _check_size(size)
             circlesize = size * max_size
             sizes = pd.Series(circlesize, index=df2.index) 
         elif isinstance(size, dict):
@@ -765,7 +1296,8 @@ def hoodmap(mdata: md.MuData,
             if any(not isinstance(k, int) or k <= 0 for k in size.keys()):
                 raise ValueError("If `size` is a dict, both keys must be an integer number of cells.")
             for k in size:
-                _check_size(size[k])
+                if check_size:
+                    _check_size(size[k])
             well_cell_counts = masked_mdata['xyz'].obs.groupby('id').size()
             numcells = tuple(size.keys())
             sizes = normalize(well_cell_counts, clip=numcells, lower=size[numcells[0]]*max_size, upper=size[numcells[1]]*max_size)
@@ -775,9 +1307,114 @@ def hoodmap(mdata: md.MuData,
     df2['sizes'] = sizes
 
     piedf = pd.concat([df1, df2], axis=1, join='inner').set_index(['arr-x', 'arr-y', 'sizes'], append=True)
-    
 
-    if plot_pies:
+
+    if cow:
+        # Cowprint mode
+        # 1. Calculate proportions for each well
+        proportion_series_list = []
+        well_ids = []
+
+        if cow_mincells is not None:
+            cellmap_ids = piedf[piedf.sum(1) < cow_mincells].index.get_level_values('id')
+            piedf = piedf[~piedf.index.get_level_values('id').isin(cellmap_ids)]
+        
+        for id in piedf.index.get_level_values(0).unique():
+            # Reset index to access data as columns
+            well_data = piedf.loc[id].reset_index()
+            
+            # Get the first row (they should all be identical for a given id)
+            well_data = well_data.iloc[0]
+            
+            # Extract proportions (all columns except 'arr-x', 'arr-y', and 'sizes')
+            proportion_cols = [col for col in well_data.index if col not in ['arr-x', 'arr-y', 'sizes']]
+            proportions = well_data[proportion_cols]
+            proportions = proportions / proportions.sum()
+            
+            proportion_series_list.append(proportions)
+            well_ids.append(id)
+
+        # 2. Consolidate proportions
+        consolidated_df = consolidate_proportions(
+            proportion_series_list, 
+            max_num=cow_maxnum, 
+            min_prop=cow_minprop,
+            reset_index=False
+        )
+        consolidated_df.index = well_ids
+        
+        # 3. Prepare color palette including "Other"
+        colors_list = [cdict[cat] for cat in consolidated_df.columns if cat in cdict]
+        if 'Other' in consolidated_df.columns:
+            # Use a neutral gray for "Other"
+            if invert:
+                colors_list.append('lightgray')
+            else:
+                colors_list.append('darkgray')
+        
+        # 4. Generate cowprint patterns
+        proportion_sets = [tuple(row.values) for _, row in consolidated_df.iterrows()]
+        
+        # Determine pattern size based on well size
+        if units == 'm':
+            pattern_size = int(chip.array.s)  # pixels roughly matching microns
+        else:
+            pattern_size = 100  # default size for well units
+        
+        cowprint_images = generate_cow_patterns(
+            shape=pattern_size,
+            proportion_sets=proportion_sets,
+            colors=colors_list,
+            bisection_strength=1.2,
+            return_segments=False,
+            n_proc=n_proc,
+        )
+
+        verts = chip.array.verts
+
+        if dilation is not None:
+            verts = resize_square_vertices(verts, dilation)
+        
+        # 5. Plot cells and cowprints onto wells
+        verts_dict = {id: [lerper(p) for p in v] for id, v in verts.items() if id in well_ids}
+
+        if cow_mincells is not None:
+
+            default_config = {
+                'invert': invert, 'legend': False, 'units': units, 
+                'color': color, 'subset': subset, 'ax': ax, 'chipnum': chipnum}
+
+            cellmap_config = get_config(cow_cellmap_kwargs, default_config, protected=tuple(default_config.keys()))
+
+            ax = cellmap(masked_mdata, **cellmap_config)
+            
+        for idx, (id, cowprint) in enumerate(zip(well_ids, cowprint_images)):
+            if id not in verts_dict:
+                continue
+                
+            verts = np.array(verts_dict[id])
+            
+            # Calculate bounding box for the well
+            x_min, x_max = verts[:, 0].min(), verts[:, 0].max()
+            y_min, y_max = verts[:, 1].min(), verts[:, 1].max()
+            
+            # Display the cowprint image within the well bounds
+            ax.imshow(
+                cowprint,
+                extent=[x_min, x_max, y_min, y_max],
+                aspect='auto',
+                interpolation='bilinear',
+                origin='lower'
+            )
+        
+        # Add legend for cowprint mode
+        if legend:
+            legend_cdict = {cat: cdict[cat] if cat in cdict else ('lightgray' if invert else 'darkgray') 
+                           for cat in consolidated_df.columns}
+            legend_params_config = get_add_legend_pm().get_params(legend_params)
+            ax = decorate_scatter(ax, config=legend_params_config, plot_type='legend', cdict=legend_cdict)
+
+    elif plot_pies:
         # Determine data types for coloring, check cmap if numeric
         dtypes = determine_data(masked_mdata, color=color, basis=basis)
 
@@ -793,7 +1430,7 @@ def hoodmap(mdata: md.MuData,
             legend_params = get_add_legend_pm().get_params(legend_params)
             ax = decorate_scatter(ax, config=legend_params, plot_type='legend', cdict=cdict)
 
-    if circleprops is not None:
+    if circleprops is not None and not cow:
         for i, ((id, x, y, size), row) in enumerate(piedf.iterrows()):
             if plot_pies:
                 # Make sure facecolor is none so pie chart is visible
@@ -936,7 +1573,7 @@ def segplot(mdata: md.MuData,
         well_dict = chip.seg[group].dropna().map(cdict).to_dict()
 
         subset={'xyz:id': list(well_dict.keys())}
-        ax = arrplot(mdata, chipnum, wells=well_dict, subset=subset, ax=ax, **kwargs)
+        ax = arrplot(mdata, chipnum=chipnum, wells=well_dict, subset=subset, ax=ax, **kwargs)
 
         for label, position in zip([chipnum, group], label_positions):
             pos, ha, va = get_text_position_vals(position)
@@ -950,4 +1587,1051 @@ def segplot(mdata: md.MuData,
             ax = decorate_scatter(ax, config=legend_params, plot_type='legend', cdict=cdict)
 
     return axes
+
+
+class MultiFeatureArrayPlot:
+
+    def __init__(self, mdata, chipnum, features, mods=None, layers=None, colors=None, order=None):
+        """
+        Initialize the MultiFeatureArrayPlot object for multi-channel spatial visualization.
+
+        Parameters
+        ----------
+        mdata : mu.MuData
+            A multimodal data object containing spatial and feature information.
+        chipnum : int or str
+            The specific chip identifier within the 'xyz' modality to be plotted.
+        features : str or list of str
+            The feature names (e.g., gene names) to be extracted and visualized.
+        mods : str or list of str, optional
+            The modality/modalities from which to extract each feature. If None,
+            defaults to 'rna' for all features.
+        layers : str or list of str, optional
+            The specific data layer to use for each feature (e.g., 'counts', 'log1p').
+            If None, uses the first available layer or 'raw'.
+        colors : list of color specifications, optional
+            List of colors to use for each feature. Can be any matplotlib-compatible
+            color format (named colors, hex, RGB tuples, etc.). If None, defaults to
+            ['red', 'green', 'blue'] for up to 3 features, extended with additional
+            distinct colors for more features.
+        order : str, optional
+            Deprecated parameter for backward compatibility. If provided with colors=None,
+            reorders the default RGB colors (e.g., 'rgb', 'bgr'). Ignored if colors is provided.
+        """
+        
+        self.mdata = mdata
+        self.chipnum = chipnum
+        self.features = features
+        self.mods = mods
+        self.layers = layers
+        self._input_colors = colors
+        self._input_order = order.lower() if order is not None else None
+        self.validate_inputs()
+
+        self.feature_data = []
+
+        for feature, mod, layer in zip(self.features, self.mods, self.layers):
+            if feature not in self.mdata[mod].var_names:
+                raise ValueError(f"Feature '{feature}' not found in modality '{mod}'.")
+            if layer != 'raw' and layer not in self.mdata[mod].layers:
+                raise ValueError(f"Layer '{layer}' not found in modality '{mod}'.")
+            self.feature_data.append(get_obs_df(self.mdata[mod], features=feature, layer=layer))
+        self.feature_data = pd.concat(self.feature_data, axis=1)
+        self.feature_data = self.feature_data.copy()
+
+        # Set up colors and determine RGB compatibility
+        self._setup_colors()
+
+
+    def _setup_colors(self):
+        """
+        Set up color mappings and determine if colors are RGB-compatible for additive plotting.
+        
+        Sets the following attributes:
+        - self.colors: dict mapping color identifiers to RGB tuples
+        - self.cmaps: list of LinearSegmentedColormaps for each feature
+        - self.is_rgb_compatible: bool indicating if plot_additive can be used
+        """
+        default_rgb = {
+            'r': (1, 0, 0),
+            'g': (0, 1, 0),
+            'b': (0, 0, 1),
+        }
+        
+        # Extended palette for more than 3 features
+        default_extended = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow', 
+                           'orange', 'purple', 'pink', 'lime', 'navy', 'teal']
+        
+        if self._input_colors is None:
+            # Use default colors
+            if self._input_order is not None:
+                # Backward compatibility: use order parameter
+                if len(self.features) > 3:
+                    raise ValueError("The 'order' parameter only works with up to 3 features. Use 'colors' parameter for more features.")
+                color_specs = [default_rgb[c] for c in self._input_order]
+                self.is_rgb_compatible = set(self._input_order) <= {'r', 'g', 'b'}
+            else:
+                # Default: RGB for first 3, then extended palette
+                num_features = len(self.features)
+                if num_features <= len(default_extended):
+                    color_specs = default_extended[:num_features]
+                else:
+                    raise ValueError(f"Maximum {len(default_extended)} features supported with default colors. Please provide custom colors.")
+                self.is_rgb_compatible = num_features <= 3
+        else:
+            # Custom colors provided
+            if len(self._input_colors) != len(self.features):
+                raise ValueError(f"Number of colors ({len(self._input_colors)}) must match number of features ({len(self.features)}).")
+            color_specs = self._input_colors
+            # Check if all colors are pure RGB
+            self.is_rgb_compatible = self._check_rgb_compatibility(color_specs)
+        
+        # Convert all color specs to RGB tuples
+        self.color_values = [mpl.colors.to_rgb(c) for c in color_specs]
+        
+        # Create dictionary for feature-to-color mapping
+        self.colors = {feature: color for feature, color in zip(self.features, self.color_values)}
+        
+        # Create colormaps (white to color)
+        self.cmaps = [LinearSegmentedColormap.from_list(f'white_to_{i}', ['white', color]) 
+                      for i, color in enumerate(self.color_values)]
+
+
+    def _check_rgb_compatibility(self, color_specs):
+        """
+        Check if provided colors are exactly pure red, green, and/or blue.
+        
+        Parameters
+        ----------
+        color_specs : list
+            List of color specifications
+            
+        Returns
+        -------
+        bool
+            True if all colors are pure R, G, or B and there are at most 3 features
+        """
+        if len(color_specs) > 3:
+            return False
+        
+        rgb_tuples = [mpl.colors.to_rgb(c) for c in color_specs]
+        pure_rgb = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        
+        for rgb in rgb_tuples:
+            # Check if color matches any pure RGB (with small tolerance for float comparison)
+            if not any(all(abs(rgb[i] - pure[i]) < 1e-6 for i in range(3)) for pure in pure_rgb):
+                return False
+        
+        return True
+
+    def validate_inputs(self):
+        """
+        Validate the integrity of input parameters and data structure.
+
+        Ensures that the MuData object contains the required 'xyz' modality, 
+        that features exist in their respective modalities/layers, and that 
+        the requested color ordering is valid.
+
+        Raises
+        ------
+        ValueError
+            If mdata is not a MuData object, if the 'xyz' modality or 'survey' 
+            metadata is missing, or if feature/modality/layer lengths are mismatched.
+        """
+        if not isinstance(self.mdata, md.MuData):
+            raise ValueError("mdata must be a MuData object.")
+
+        if 'xyz' not in self.mdata.mod:
+            raise ValueError("Modality 'xyz' must be present in mdata for array plotting.")
+        
+        if 'survey' not in self.mdata['xyz'].uns:
+            raise ValueError("Modality 'xyz' must contain a 'survey' key in `.uns`.")
+
+        if self.chipnum not in self.mdata['xyz'].uns['survey'].chips:
+            raise ValueError(f"Chip number {self.chipnum} not found in modality 'xyz'.")
+
+        if isinstance(self.features, str):
+            self.features = [self.features]
+        elif not isinstance(self.features, (list, tuple)):
+            raise ValueError("features must be a string or a list/tuple of strings.")
+        else:
+            self.features = list(self.features)
+
+        # No maximum feature limit anymore
+        
+        if self.mods is None:
+            self.mods = ['rna'] * len(self.features)
+        elif isinstance(self.mods, str):
+            self.mods = [self.mods] * len(self.features)
+        elif isinstance(self.mods, (list, tuple)):
+            if len(self.mods) != len(self.features):
+                raise ValueError("Length of mods must match length of features.")
+            else:
+                self.mods = list(self.mods)
+
+        for feature, mod in zip(self.features, self.mods):
+            if feature in self.mdata['xyz'].obs.columns and mod != 'xyz':
+                raise ValueError(f"Feature '{feature}' exists in 'xyz' obs; please drop this column to plot the feature from {mod}.")
+        
+        if self.layers is None:
+            layers = []
+            for mod in self.mods:
+                if len(self.mdata[mod].layers) == 0:
+                    layers.append('raw')
+                else:
+                    layers.append(list(self.mdata[mod].layers.keys())[0])
+            self.layers = layers
+        elif isinstance(self.layers, str):
+            self.layers = [self.layers] * len(self.features)
+        elif isinstance(self.layers, (list, tuple)):
+            if len(self.layers) != len(self.features):
+                raise ValueError("Length of layers must match length of features.")
+            else:
+                self.layers = list(self.layers)
+        
+        # Validate order parameter (for backward compatibility)
+        if self._input_order is not None:
+            if not isinstance(self._input_order, str):
+                raise ValueError("order must be a string ('rgb' or any permutation).")
+            elif set(self._input_order) != set('rgb'):
+                raise ValueError("order must be a permutation of 'r', 'g', 'b'.")
+            if self._input_colors is not None:
+                warnings.warn("Both 'colors' and 'order' parameters provided. 'order' will be ignored.", UserWarning)
+
+    def get_configs(self, wells, kwargs, protected):
+        """
+        Generate individual configuration dictionaries for each feature.
+
+        Parameters
+        ----------
+        wells : list, dict, or str
+            Well identifiers to be plotted. Can be a single set applied to all 
+            features or a mapping of features to specific wells.
+        kwargs : dict
+            Additional keyword arguments for the plotting function.
+        protected : set
+            A set of parameter names that are managed internally and cannot 
+            be overridden via kwargs.
+
+        Returns
+        -------
+        dict
+            A dictionary where keys are feature names and values are 
+            dictionaries of parameters for `svp.pl.arrplot`.
+        """
+
+        if 'wells' not in protected:
+            raise ValueError("The 'wells' parameter must be protected and cannot be overridden in arrplot.")
+        
+        arrplot_configs = {feature: {} for feature in self.features}
+        for k, v in kwargs.items():
+            if k in protected:
+                raise ValueError(f"Cannot override protected parameter '{k}' in arrplot.")
+            if isinstance(v, dict) and all([i in self.features for i in v.keys()]):
+                for feature in self.features:
+                    arrplot_configs[feature][k] = v[feature]
+            else:
+                for feature in self.features:
+                    arrplot_configs[feature][k] = v
+        
+        if isinstance(wells, dict):
+            for feature in self.features:
+                if feature not in wells:
+                    raise ValueError(f"When providing wells as a dictionary, it must contain an entry for each feature. Missing: '{feature}'")
+                arrplot_configs[feature]['wells'] = wells[feature]
+        else:
+            for feature in self.features:
+                arrplot_configs[feature]['wells'] = wells
+
+        return arrplot_configs
+
+
+    def visualize_dists(self, wells, return_welldata=False, **kwargs):
+        """
+        Generate ridge plots to visualize the distribution of feature intensities.
+
+        Useful for assessing normalization and contrast before merging channels.
+
+        Parameters
+        ----------
+        wells : list, dict, or str
+            Well identifiers to include in the distribution analysis.
+        return_welldata : bool, default False
+            If True, returns the processed well data intensities.
+        **kwargs : dict
+            Additional arguments passed to the underlying `arrplot` call.
+
+        Returns
+        -------
+        dict or None
+            If `return_welldata` is True, returns a dictionary mapping features 
+            to intensity DataFrames; otherwise returns None.
+        """
+
+        protected = {'mdata', 'chipnum', 'feature', 'wells', 'plot', 'return_welldata'}
+        arrplot_configs = self.get_configs(wells, kwargs, protected=protected)
+
+        self.mdata['xyz'].obs = self.mdata['xyz'].obs.join(self.feature_data, how='left')
+        try:
+            welldatas = {}
+
+            feature = self.features[0]
+            welldatas[feature] = arrplot(self.mdata, chipnum=self.chipnum, color=feature, plot=False, return_welldata=True, **arrplot_configs[feature])
+            plt.close() # bug in arrplot, fixed on instance repo, needs to be pushed
+            for idx, feature in enumerate(self.features[1:], start=1):
+                welldatas[feature] = arrplot(self.mdata, chipnum=self.chipnum, color=feature, plot=False, return_welldata=True, **arrplot_configs[feature])
+                plt.close()
+            palette = {feature: color for feature, color in zip(self.features, self.color_values)}
+            df = pd.DataFrame(welldatas).melt(var_name='feature')
+
+            ridge = Ridge(df, x='value', y='feature')
+            ridge.add_ridge_data(hist=True, kde=False, bins=50, order=self.features)
+            fig, axes = ridge.plot(colors=[palette[c] for c in ridge.order], legend=True)
+            fig.text(0.08, 0.55, 'Number of Wells', va='center', rotation='vertical')
+
+        except Exception as e:
+            raise e
+        finally:
+            self.mdata['xyz'].obs.drop(columns=self.features, inplace=True)
+        if return_welldata:
+            return welldatas
+        else:
+            return
+
+
+    def visualize_maps(self, wells, ar=1.1, fss=10, alpha_cmap_kwargs=None, **kwargs):
+        """
+        Plot individual spatial heatmaps for each feature in a grid.
+
+
+
+        Parameters
+        ----------
+        wells : list, dict, or str
+            Well identifiers to be plotted.
+        ar : float, default 1.1
+            Aspect ratio for the subplots.
+        fss : int, default 10
+            Figure size scaling factor.
+        alpha_cmap_kwargs : dict, optional
+            Arguments passed to `create_alpha_cmap` to handle transparency.
+        **kwargs : dict
+            Additional arguments passed to the underlying `arrplot` call.
+        """
+
+        alpha_cmap_config = get_config(alpha_cmap_kwargs, {'scale_alpha': True})
+        protected = {'mdata', 'chipnum', 'feature', 'wells', 'cmap', 'ax', 'cbar', 'plot_label'}
+        arrplot_configs = self.get_configs(wells, kwargs, protected=protected)
+
+        fig, axes = subplots(len(self.features), ar=ar, fss=fss, as_seq=True)
+
+        self.mdata['xyz'].obs = self.mdata['xyz'].obs.join(self.feature_data, how='left')
+        try:
+            for ax, cmap, feature in zip(axes.flat, self.cmaps, self.features):
+                cmap = create_alpha_cmap(cmap, **alpha_cmap_config)
+                ax = arrplot(self.mdata, chipnum=self.chipnum, color=feature, cmap=cmap, cbar=True, plot_label=True, ax=ax, **arrplot_configs[feature])
+        except Exception as e:
+            raise e
+        finally:
+            self.mdata['xyz'].obs.drop(columns=self.features, inplace=True)
+
+
+    def merge_color_dictionaries(self, welldicts, baseline=0):
+        """
+        Merge one, two, or three dictionaries into a single RGB color map.
+        
+        Maps intensity values to colors by creating gradients from a baseline color
+        to pure R, G, B, or their combinations (yellow, magenta, cyan, or grayscale).
+        Designed for plotting on white backgrounds where higher values → darker colors.
+        
+        Parameters
+        ----------
+        welldicts : list of dict
+            List of 1-3 dictionaries mapping IDs to intensity values.
+            - welldicts[0]: Red channel intensities
+            - welldicts[1]: Blue channel intensities (if provided)
+            - welldicts[2]: Green channel intensities (if provided)
+            Values should be pre-normalized/digitized to desired range.
+        baseline : float, default=0
+            Starting saturation of the colormap (0-1).
+            - 0: gradients start at white
+            - 1: gradients start at full color
+            - 0.25: gradients start at 25% saturated color
+        
+        Returns
+        -------
+        dict
+            Dictionary mapping IDs to RGB tuples with values in range [0, 1].
+            
+        Notes
+        -----
+        Color mapping logic based on active channels:
+        - R only: white/baseline → red
+        - G only: white/baseline → green  
+        - B only: white/baseline → blue
+        - R+G: white/baseline → yellow
+        - R+B: white/baseline → magenta
+        - G+B: white/baseline → cyan
+        - R+G+B: white/baseline → black (grayscale)
+        
+        Intensity is calculated as the sum of values across all provided channels,
+        normalized by the number of active channels. Higher intensity values produce
+        darker colors (approaching the target color or black for grayscale).
+        """
+        # Validate input
+        if not isinstance(welldicts, list) or len(welldicts) == 0 or len(welldicts) > 3:
+            raise ValueError("welldicts must be a list of 1-3 dictionaries")
+        
+        # Pad with empty dicts if fewer than 3 provided
+        while len(welldicts) < 3:
+            welldicts.append({})
+        
+        r_dict, b_dict, g_dict = welldicts[0], welldicts[1], welldicts[2]
+        
+        # Get all unique IDs
+        all_ids = set(r_dict.keys()) | set(b_dict.keys()) | set(g_dict.keys())
+        
+        # Determine which channels are available
+        r_available = len(r_dict) > 0
+        g_available = len(g_dict) > 0
+        b_available = len(b_dict) > 0
+        
+        # Count active channels
+        num_active_channels = sum([r_available, g_available, b_available])
+        
+        if num_active_channels == 0:
+            raise ValueError("At least one dictionary must contain data")
+        
+        color_map = {}
+        
+        for id_ in all_ids:
+            # Get intensity values (default to 0 if ID not in dict)
+            r_val = r_dict.get(id_, 0)
+            g_val = g_dict.get(id_, 0)
+            b_val = b_dict.get(id_, 0)
+            
+            # Calculate total intensity (sum of values from active channels)
+            total_intensity = 0
+            if r_available and r_val > 0:
+                total_intensity += r_val
+            if g_available and g_val > 0:
+                total_intensity += g_val
+            if b_available and b_val > 0:
+                total_intensity += b_val
+            
+            # Normalize intensity to 0-1 range
+            # Use max possible value from all active channels
+            max_vals = []
+            if r_available:
+                max_vals.append(max(r_dict.values()) if r_dict else 0)
+            if g_available:
+                max_vals.append(max(g_dict.values()) if g_dict else 0)
+            if b_available:
+                max_vals.append(max(b_dict.values()) if b_dict else 0)
+            
+            max_sum = sum(max_vals)
+            intensity = total_intensity / max_sum if max_sum > 0 else 0
+            
+            # Determine which channels are active for this ID
+            r_active = r_available and r_val > 0
+            g_active = g_available and g_val > 0
+            b_active = b_available and b_val > 0
+            
+            # Determine target color based on active channels (additive mixing)
+            if r_active and g_active and b_active:
+                # All three: grayscale (white → black)
+                target_color = (0.0, 0.0, 0.0)  # Black
+            elif r_active and g_active:
+                # R+G: yellow
+                target_color = (1.0, 1.0, 0.0)
+            elif r_active and b_active:
+                # R+B: magenta
+                target_color = (1.0, 0.0, 1.0)
+            elif g_active and b_active:
+                # G+B: cyan
+                target_color = (0.0, 1.0, 1.0)
+            elif r_active:
+                # Only R: red
+                target_color = (1.0, 0.0, 0.0)
+            elif g_active:
+                # Only G: green
+                target_color = (0.0, 1.0, 0.0)
+            elif b_active:
+                # Only B: blue
+                target_color = (0.0, 0.0, 1.0)
+            else:
+                # None active: white
+                target_color = (1.0, 1.0, 1.0)
+            
+            # Calculate baseline color (starting point)
+            # Baseline shifts from white (1,1,1) toward target color
+            baseline_color = (
+                1.0 - baseline * (1.0 - target_color[0]),
+                1.0 - baseline * (1.0 - target_color[1]),
+                1.0 - baseline * (1.0 - target_color[2])
+            )
+            
+            # Linear interpolation from baseline to target based on intensity
+            # Higher intensity → move toward target (darker/more saturated)
+            r = baseline_color[0] - intensity * (baseline_color[0] - target_color[0])
+            g = baseline_color[1] - intensity * (baseline_color[1] - target_color[1])
+            b = baseline_color[2] - intensity * (baseline_color[2] - target_color[2])
+            
+            color_map[id_] = (r, g, b)
+        
+        return color_map
+
+
+    def plot_alpha(self, wells, alpha_cmap_kwargs=None, legend=True, **kwargs):
+        """
+        Overlay multiple features using alpha-blended colormaps.
+
+        Each feature is plotted on the same axes with a custom transparency 
+        gradient, allowing visual overlap of up to three channels.
+
+
+
+        Parameters
+        ----------
+        wells : list, dict, or str
+            Well identifiers to be plotted.
+        alpha_cmap_kwargs : dict, optional
+            Configuration for the transparency scaling (e.g., `scale_alpha`).
+        legend : bool, default True
+            Whether to display the legend.
+        **kwargs : dict
+            Additional arguments passed to the underlying `arrplot` call.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes object containing the overlaid plots and custom legend if requested.
+        """
+
+        alpha_cmap_config = get_config(alpha_cmap_kwargs, {'scale_alpha': True})
+        protected = {'mdata', 'chipnum', 'feature', 'wells', 'cmap', 'ax', 'cbar', 'plot_label'}
+        arrplot_configs = self.get_configs(wells, kwargs, protected=protected)
+
+        self.mdata['xyz'].obs = self.mdata['xyz'].obs.join(self.feature_data, how='left')
+        try:
+            cmap = create_alpha_cmap(self.cmaps[0], **alpha_cmap_config)
+            feature = self.features[0]
+            ax = arrplot(self.mdata, chipnum=self.chipnum, color=feature, cmap=cmap, cbar=False, plot_label=False, **arrplot_configs[feature])
+            for idx, feature in enumerate(self.features[1:], start=1):
+                cmap = create_alpha_cmap(self.cmaps[idx], **alpha_cmap_config)
+                ax = arrplot(self.mdata, chipnum=self.chipnum, color=feature, cmap=cmap, cbar=False, plot_label=False, ax=ax, **arrplot_configs[feature])
+            palette = {feature: color for feature, color in zip(self.features, self.color_values)}
+            if legend:
+                config = get_pm('legend').get_params()
+                ax = decorate_scatter(ax, plot_type='legend', config=config, cdict=palette)
+        except Exception as e:
+            raise e
+        finally:
+            self.mdata['xyz'].obs.drop(columns=self.features, inplace=True)
+        
+        return ax
+
+
+    def plot_additive(self, wells, norms=None, baseline=0, **kwargs):
+        """
+        Plot features using additive color mixing (RGB logic).
+
+        Normalizes intensities and merges them into a single RGB dictionary for 
+        plotting. This method only works when features are assigned to pure red,
+        green, and/or blue colors.
+
+        Parameters
+        ----------
+        wells : list, dict, or str
+            Well identifiers to be plotted.
+        norms : list, tuple, or dict, optional
+            Normalization bounds (min, max). If a tuple, applies to all features. 
+            If a dict, maps feature names to specific (min, max) tuples.
+        baseline : float, default 0
+            The background saturation level (0 is white).
+        **kwargs : dict
+            Additional arguments passed to the underlying `arrplot` call.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes object containing the combined additive color plot.
+            
+        Raises
+        ------
+        ValueError
+            If the assigned colors are not RGB-compatible (i.e., not pure red,
+            green, and/or blue).
+        """
+        
+        # Check RGB compatibility
+        if not self.is_rgb_compatible:
+            raise ValueError(
+                "plot_additive() only works with pure red (1,0,0), green (0,1,0), and blue (0,0,1) colors. "
+                "Current colors are not RGB-compatible. Use plot_alpha() instead or reinitialize with "
+                "RGB-compatible colors (e.g., colors=['red', 'green', 'blue'])."
+            )
+        
+        if len(self.features) > 3:
+            raise ValueError("plot_additive() only supports up to 3 features.")
+        
+        for kwarg in kwargs:
+            if kwarg in {'cbar', 'plot_label'} and kwargs[kwarg]:
+                raise ValueError(f"The '{kwarg}' parameter is not supported for plot_additive().")
+            elif kwarg in {'norm'}:
+                raise ValueError(f"The '{kwarg}' parameter is not supported for plot_additive(), please supply norms directly using the 'norms' parameter.")
+
+        if norms is not None:
+            if isinstance(norms, (list, tuple)):
+                if len(norms) != 2:
+                    raise ValueError("If norms is a list/tuple, it must be of the form (min1, max1), which will be applied to all features.")
+                norms = {feature: norms for feature in self.features}
+            elif isinstance(norms, dict):
+                for feature in norms:
+                    if feature not in self.features:
+                        raise ValueError(f"norms dictionary contains an invalid feature '{feature}'. Must match features provided.")
+                    if not isinstance(norms[feature], (list, tuple)) or len(norms[feature]) != 2:
+                        raise ValueError("Each entry in norms must be a tuple/list of (min, max).")
+                    not_in_norms = set(self.features) - set(norms.keys())
+                    for feature in not_in_norms:
+                        norms.update({feature: [None, None]})
+
+        
+        welldatas = self.visualize_dists(wells, return_welldata=True, **kwargs)
+        plt.close()
+        if norms is not None:
+            for feature in self.features:
+                welldatas[feature] = normalize(welldatas[feature], clip=(norms[feature][0], norms[feature][1]))
+        color_map = self.merge_color_dictionaries([welldatas[f].to_dict() for f in welldatas], baseline=baseline)
+        ax = arrplot(self.mdata, chipnum=self.chipnum, wells=color_map, cbar=False, plot_label=False, **kwargs)
+
+        return ax
+
+
+class DiffusionVisualizer:
+
+    def __init__(self, mdata, chipnum, chip_key_prop='rna:chip-num', layer=None):
+        """
+        Initialize the DiffusionVisualizer to analyze barcode spatial diffusion.
+
+        Parameters
+        ----------
+        mdata : MuData
+            Multimodal data object containing spatial and sequencing information.
+            Must contain an 'xyz' modality with survey information.
+        chipnum : int or str
+            The identifier for the specific chip to visualize.
+        chip_key_prop : str, default 'rna:chip-num'
+            The column name in `mdata.obs` used to filter observations by `chipnum`.
+        layer : str, optional
+            The specific layer in the modality anndata objects to use for counts. 
+            If None, uses `.X`.
+
+        Raises
+        ------
+        ValueError
+            If 'xyz' modality or 'survey' key is missing.
+            If `chipnum` is not found in the survey.
+            If `chip_key_prop` is missing from `mdata.obs`.
+            If required modalities for the chip's barcode types are missing.
+            If the chip layout does not have exactly 2 spatial indices.
+        """
+
+        if 'xyz' not in mdata.mod:
+            raise ValueError("mdata must have 'xyz' modality for spatial plotting.")
+        if 'survey' not in mdata['xyz'].uns:
+            raise ValueError("mdata['xyz'] must have 'survey' key.")
+        
+        if chipnum not in mdata['xyz'].uns['survey'].chips:
+            raise ValueError(f"Chip number {chipnum} not found in mdata['xyz'].uns['survey'].chips.")
+        
+        if chip_key_prop not in mdata.obs:
+            raise ValueError(f"\
+                             The `mdata.obs` must contain '{chip_key_prop}' column for subsetting by chip number.\
+                             Please add it using mdata.update from any modality that contains the chip number information.\
+                                ")
+        
+        chip = mdata['xyz'].uns['survey'].chips[chipnum]
+        bctypes = chip.layout.bctypes
+
+        for bctype in bctypes:
+            if bctype not in mdata.mod:
+                raise ValueError(f"mdata must contain modality '{bctype}' for chip {chipnum}.")
+    
+        submdata = mdata[mdata.obs[chip_key_prop] == chipnum]
+
+        if submdata.n_obs == 0:
+            raise ValueError(f"No observations found for chip {chipnum}. Please check parameters.")
+
+        num_spidxes = len(chip.layout.coords)
+
+        if num_spidxes != 2:
+            raise ValueError(f"Chip {chipnum} has {num_spidxes} spatial indices, but this visualizer is designed only for 2.")
+
+        spbcmaps = self.get_spbcmaps(submdata, chip, num_spidxes, bctypes, layer)
+        toplocs = self.get_top_locs(chip, num_spidxes, spbcmaps)
+
+        self.mdata = mdata
+        self.submdata = submdata
+        self.chip = chip
+        self.chip_key_prop = chip_key_prop
+        self.layer = layer
+
+        self.spbcmaps = spbcmaps
+        self.toplocs = toplocs
+
+        self.diffarr = None
+
+    def __repr__(self):
+        return f"DiffusionVisualizer for chip {self.chipnum} ({self.chip.layout.format}, {'-'.join(self.bctypes)}, ncells={self.submdata.n_obs})"
+    
+    def __str__(self):
+        return self.__repr__()
+    
+    @property
+    def chipnum(self):
+        """
+        Get the current chip identifier.
+
+        Returns
+        -------
+        int or str
+            The chip number.
+        """
+        return self.chip.num
+
+    @property
+    def num_spidxes(self):
+        """
+        Get the number of spatial indices for the current chip.
+
+        Returns
+        -------
+        int
+            Number of coordinate axes (e.g., 2 for 2D layouts).
+        """
+        return len(self.chip.layout.coords)
+
+    @property
+    def bctypes(self):
+        """
+        Get the barcode types associated with the current chip.
+
+        Returns
+        -------
+        list of str
+            List of modality keys representing barcode types.
+        """
+        return self.chip.layout.bctypes
+    
+    @property
+    def center(self):
+        """
+        Get the dimensions/center reference of the chip layout.
+
+        Returns
+        -------
+        tuple of int
+            The shape (rows, cols) of the chip's design array.
+        """
+        return self.chip.layout.da.shape[:2]
+    
+    def get_ranges(self):
+        """
+        Get the spatial coordinate ranges for the chip layout.
+
+        Returns
+        -------
+        list of range
+            List of range objects for each spatial dimension, centered around zero.
+        """
+        rangerows = range(-self.chip.layout.df.shape[0] + 1, self.chip.layout.df.shape[0])
+        rangecols = range(-self.chip.layout.df.shape[1] + 1, self.chip.layout.df.shape[1])
+        return rangerows, rangecols
+    
+    def get_spbcmaps(self, submdata, chip, num_spidxes, bctypes, layer=None):
+        """
+        Map spatial barcodes to their count matrices for native and permuted states.
+
+        Parameters
+        ----------
+        submdata : MuData
+            Subset of the master MuData containing only observations for the current chip.
+        chip : Chip
+            The chip object containing layout and mapper information.
+        num_spidxes : int
+            The number of spatial indices to process.
+        bctypes : list of str
+            The barcode modalities to extract.
+        layer : str, optional
+            The AnnData layer to extract counts from. Defaults to `.X`.
+
+        Returns
+        -------
+        dict
+            A nested dictionary with keys 'n' (native) and 'p' (permuted).
+            Each contains indexed dictionaries with count matrices ('x'), 
+            names ('s'), and mapped values ('v').
+        """
+        spbcmaps = {'n': {}, 'p': {}} # native, permuted
+
+        for bctype, i in zip(bctypes, range(num_spidxes)):
+            spbcmaps['n'][i] = {}
+            subsbc_view = submdata[bctype][:, chip.layout.mappers[i].index]
+
+            if layer is None:
+                spbcmaps['n'][i]['x'] = subsbc_view.X.astype(int).copy()
+            else:
+                spbcmaps['n'][i]['x'] = subsbc_view.layers[layer].astype(int).copy()
+
+            spbcmaps['n'][i]['x'].eliminate_zeros()
+            spbcmaps['n'][i]['s'] = subsbc_view.var_names.copy()
+            spbcmaps['n'][i]['v'] = subsbc_view.var_names.map(chip.layout.mappers[i].to_dict())
+
+            spbcmaps['p'][i] = {}
+
+            arr = spbcmaps['n'][i]['x'].toarray().flatten()
+            np.random.shuffle(arr)
+            arr = arr.reshape(spbcmaps['n'][i]['x'].shape)
+            spbcmaps['p'][i]['x'] = csr_matrix(arr)
+            spbcmaps['p'][i]['s'] = spbcmaps['n'][i]['s'].copy()
+            spbcmaps['p'][i]['v'] = spbcmaps['n'][i]['v'].copy()
+
+        return spbcmaps
+    
+    
+    def get_top_locs(self, chip, num_spidxes, spbcmaps):
+        """
+        Identify the spatial locations of the most frequent barcodes (top barcodes).
+
+        Parameters
+        ----------
+        chip : Chip
+            The chip object containing layout and coordinate metadata.
+        num_spidxes : int
+            The number of spatial indices.
+        spbcmaps : dict
+            The mapping dictionary generated by `get_spbcmaps`.
+
+        Returns
+        -------
+        dict
+            A dictionary with keys 'n' and 'p' containing lists of 
+            coordinate tuples representing the "top" spatial location 
+            for each observation. Returns -1 if no data is present.
+        """
+        top_bcids = {'n': {}, 'p': {}} # native, permuted
+        toplocs_bcid = {'n': {}, 'p': {}} # native, permuted
+        toplocs = {'n': [], 'p': []} # native, permuted
+
+        for i in range(num_spidxes):
+            top_bcids['n'][i] = []
+            for row in spbcmaps['n'][i]['x']:
+                if row.data.size > 0:
+                    nzidxes = row.nonzero()[1]
+                    bcids = spbcmaps['n'][i]['s'][nzidxes]
+                    top_bcid = bcids[np.argsort(row.data)[-1]]
+                else:
+                    top_bcid = np.nan
+                top_bcids['n'][i].append(top_bcid)
+
+        for i in range(num_spidxes):
+            top_bcids['p'][i] = []
+            for row in spbcmaps['p'][i]['x']:
+                if row.data.size > 0:
+                    nzidxes = row.nonzero()[1]
+                    bcids = spbcmaps['p'][i]['s'][nzidxes]
+                    top_bcid = bcids[np.argsort(row.data)[-1]]
+                else:
+                    top_bcid = np.nan
+                top_bcids['p'][i].append(top_bcid)
+                
+        toplocs_bcid['n'] = list('-'.join(map(str, t)) for t in zip(*(top_bcids['n'][i] for i in top_bcids['n'].keys())))
+        toplocs_bcid['p'] = list('-'.join(map(str, t)) for t in zip(*(top_bcids['p'][i] for i in top_bcids['p'].keys())))
+
+        for toploc_bcid in toplocs_bcid['n']:
+            if 'nan' in toploc_bcid:
+                toplocs['n'].append(-1)
+            else:
+                toplocs['n'].append(tuple(chip.layout.df_stacked.loc[toploc_bcid]))
+
+        for toploc_bcid in toplocs_bcid['p']:
+            if 'nan' in toploc_bcid:
+                toplocs['p'].append(-1)
+            else:
+                toplocs['p'].append(tuple(chip.layout.df_stacked.loc[toploc_bcid]))
+        
+        return toplocs
+
+
+    def add_diffarr(self):
+        """
+        Calculate the spatial diffusion arrays for native and permuted data.
+
+        This method populates `self.diffarr` with:
+            - 'n': Cumulative spatial distribution of barcodes relative to the top barcode.
+            - 'p': Randomly shuffled spatial distribution (control).
+            - 'd': The difference ('n' - 'p'), representing non-random diffusion.
+
+        Returns
+        -------
+        None
+        """
+
+        arr_template = np.zeros((self.center[0]*2-1, self.center[1]*2-1), dtype=int)
+
+        diffarr = {'n': arr_template.copy(), 'p': arr_template.copy()} # native, permuted
+
+        print("Calculating diffusion arrays for native data...", end=' ')
+        for row0, row1, loc in zip(self.spbcmaps['n'][0]['x'], self.spbcmaps['n'][1]['x'], self.toplocs['n']):
+            if loc == -1:
+                continue
+            nzidxes = row0.nonzero()[1]
+            bcids = self.spbcmaps['n'][0]['v'][nzidxes]
+            # top_bcid = bcids[np.argsort(row0.data)[-1]]
+            for idx, bcid in enumerate(bcids):
+                row_range, col_range = slice(self.center[0]-loc[0], 2*self.center[0]-loc[0]), slice(self.center[1]-loc[1], 2*self.center[1]-loc[1])
+                diffarr['n'][row_range, col_range] += np.where(self.chip.layout.da[:, :, 0] == bcid, row0.data[idx], 0)
+            
+            nzidxes = row1.nonzero()[1]
+            bcids = self.spbcmaps['n'][1]['v'][nzidxes]
+            # top_bcid = bcids[np.argsort(row1.data)[-1]]
+            for idx, bcid in enumerate(bcids):
+                row_range, col_range = slice(self.center[0]-loc[0], 2*self.center[0]-loc[0]), slice(self.center[1]-loc[1], 2*self.center[1]-loc[1])
+                diffarr['n'][row_range, col_range] += np.where(self.chip.layout.da[:, :, 1] == bcid, row1.data[idx], 0)
+        print("Done.")
+
+        print("Calculating diffusion arrays for permuted data...", end=' ')
+        for row0, row1, loc in zip(self.spbcmaps['p'][0]['x'], self.spbcmaps['p'][1]['x'], self.toplocs['p']):
+            if loc == -1:
+                continue
+            nzidxes = row0.nonzero()[1]
+            bcids = self.spbcmaps['p'][0]['v'][nzidxes]
+            # top_bcid = bcids[np.argsort(row0.data)[-1]]
+            for idx, bcid in enumerate(bcids):
+                row_range, col_range = slice(self.center[0]-loc[0], 2*self.center[0]-loc[0]), slice(self.center[1]-loc[1], 2*self.center[1]-loc[1])
+                diffarr['p'][row_range, col_range] += np.where(self.chip.layout.da[:, :, 0] == bcid, row0.data[idx], 0)
+            
+            nzidxes = row1.nonzero()[1]
+            bcids = self.spbcmaps['p'][1]['v'][nzidxes]
+            # top_bcid = bcids[np.argsort(row1.data)[-1]]
+            for idx, bcid in enumerate(bcids):
+                row_range, col_range = slice(self.center[0]-loc[0], 2*self.center[0]-loc[0]), slice(self.center[1]-loc[1], 2*self.center[1]-loc[1])
+                diffarr['p'][row_range, col_range] += np.where(self.chip.layout.da[:, :, 1] == bcid, row1.data[idx], 0)
+        print("Done.")
+        
+        diffarr['d'] = np.abs(diffarr['n'] - diffarr['p'])
+
+        self.diffarr = diffarr
+        return
+
+
+    def plot_diffarrs(self, norm=None, fss=6, plotarrs=None):
+        """
+        Plot the native, permuted, and difference diffusion arrays.
+
+        Parameters
+        ----------
+        norm : matplotlib.colors.Normalize or list thereof, optional
+            Normalization to apply to the heatmaps. Can be a single 
+            normalizer or a list of three for [native, permuted, diff].
+        fss : int, default 6
+            Figure size scaling factor.
+        plotarrs : list of str, optional
+            List of which arrays to plot. Can contain any of 'n' (native),
+            'p' (permuted), 'd' (difference). If None, plots all three.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            The generated figure object.
+        axes : numpy.ndarray of matplotlib.axes.Axes
+            The array of subplot axes.
+        """
+        ar = self.chip.array.arr_shape[0]/self.chip.array.arr_shape[1]
+        name_mapper = {'n': 'Native', 'p': 'Permuted', 'd': 'Difference'}
+
+        if plotarrs is not None:
+            if not all(plotarr in ('n', 'p', 'd') for plotarr in plotarrs):
+                raise ValueError("plotarrs must be a list containing any of 'n', 'p', 'd'.")
+            arr_names = list(plotarrs)
+        else:
+            arr_names = ['n', 'p', 'd']
+        
+        fig, axes = subplots(len(arr_names), ar=ar, fss=fss, as_seq=True)
+        if norm is None:
+            norms = [None]*len(arr_names)
+        elif isinstance(norm, (list, tuple)) and len(norm) == len(arr_names):
+            norms = norm
+        else: # norm must be a normalizer
+            norms = [norm]*len(arr_names)
+
+        for ax, arr_name, norm in zip(axes, arr_names, norms):
+            arr = self.diffarr[arr_name]
+            ax.imshow(arr, cmap='viridis', norm=norm)
+            ax.grid()
+            ax.set_title(f"Diffusion map: {name_mapper[arr_name]}")
+        
+        return fig, axes
+    
+    
+    def plot_marginal_diffs(self, fss=3, ylabel_yoffset=-0.1):
+        """
+        Plot marginal distributions of barcode diffusion along spatial axes.
+
+        Parameters
+        ----------
+        fss : int, default 3
+            Figure size scaling factor.
+        ylabel_yoffset : float, default -0.1
+            Vertical offset for the y-axis label to improve spacing.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            The generated figure object.
+        axes : numpy.ndarray of matplotlib.axes.Axes
+            The array of subplot axes (one for each spatial dimension).
+
+        Raises
+        ------
+        ValueError
+            If the chip layout format is not 'rowcol'.
+        """
+
+        if self.chip.layout.format != 'rowcol':
+            raise ValueError("Marginal diffs plot is only implemented for 'rowcol' format chips.")
+
+        label_mapper = {
+            'row': 'Row',
+            'col': 'Column'
+        }
+
+        diffarr_normz_sums = self.diffarr['d'].sum(0), self.diffarr['d'].sum(1)
+        
+        overallsum = self.diffarr['d'].sum()
+
+        fig, axes = subplots(2, ncols=1, ar=3, fss=fss)
+
+        rangerows, rangecols = self.get_ranges()
+        if self.chip.layout.coords[0] == 'row' and self.chip.layout.coords[1] == 'col':
+            range0, range1 = rangecols, rangerows
+        else:
+            range0, range1 = rangerows, rangecols
+        axes[0].bar(range0, diffarr_normz_sums[0]/overallsum)
+        axes[1].bar(range1, diffarr_normz_sums[1]/overallsum)
+
+        label0, label1 = label_mapper[self.chip.layout.coords[1]], label_mapper[self.chip.layout.coords[0]]
+
+        axes[0].set_xlabel(f'{label0} offset from top {label0.lower()} barcode')
+        axes[1].set_xlabel(f'{label1} offset from top {label1.lower()} barcode')
+
+        axes[0].set_ylabel('Relative frequency of non-top barcodes', y=ylabel_yoffset, horizontalalignment='center')
+        # skip adjusting ylabel for second plot since they share the same y-axis meaning
+
+        plt.tight_layout()
+        
+        return fig, axes
+
+
 
