@@ -171,6 +171,13 @@ def determine_data(data: Union[sc.AnnData, md.MuData],
 
     if all(param is None for param in (mod, color, basis)):
         return results
+    
+    if results['data'] == 'mdata':
+        # Add any modalities not in MOD_ORDER to the end of the order
+        extra_mods = [m for m in data.mod if m not in MOD_ORDER]
+        mod_order = MOD_ORDER + extra_mods
+    else:
+        mod_order = MOD_ORDER  # Not used for adata, but defined for consistency
 
     if mod is not None:
         if results['data'] == 'mdata' and mod not in data.mod:
@@ -196,7 +203,7 @@ def determine_data(data: Union[sc.AnnData, md.MuData],
         if results['data'] == 'mdata':
             # Joint search for color and basis
             if color is not None and basis is not None:
-                found_mods = [m for m in MOD_ORDER if m in data.mod and f'X_{basis}' in data[m].obsm and determine_color_type(data[m], color) is not None]
+                found_mods = [m for m in mod_order if m in data.mod and f'X_{basis}' in data[m].obsm and determine_color_type(data[m], color) is not None]
                 if found_mods:
                     best_mod = found_mods[0]
                     results['color'] = {'mod': best_mod, 'type': determine_color_type(data[best_mod], color)}
@@ -206,7 +213,7 @@ def determine_data(data: Union[sc.AnnData, md.MuData],
             
             # Separate searches if not found jointly or not requested jointly
             if color is not None and results['color'] is None:
-                found_mods_color = [m for m in MOD_ORDER if m in data.mod and determine_color_type(data[m], color) is not None]
+                found_mods_color = [m for m in mod_order if m in data.mod and determine_color_type(data[m], color) is not None]
                 if found_mods_color:
                     best_mod = found_mods_color[0]
                     results['color'] = {'mod': best_mod, 'type': determine_color_type(data[best_mod], color)}
@@ -214,7 +221,7 @@ def determine_data(data: Union[sc.AnnData, md.MuData],
                         warnings.warn(f"Found color '{color}' in multiple modalities: {found_mods_color}. Using '{best_mod}'.")
 
             if basis is not None and results['basis'] is None:
-                found_mods_basis = [m for m in MOD_ORDER if m in data.mod and f'X_{basis}' in data[m].obsm]
+                found_mods_basis = [m for m in mod_order if m in data.mod and f'X_{basis}' in data[m].obsm]
                 if found_mods_basis:
                     results['basis'] = found_mods_basis[0]
                     if len(found_mods_basis) > 1:

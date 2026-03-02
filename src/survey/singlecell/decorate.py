@@ -41,8 +41,8 @@ LEGEND_PLACEMENT_CODES = {
     'TL1': {'loc': 'upper left',   'bbox_to_anchor': (0 + MARGIN, 1 - MARGIN)},
     'TC1': {'loc': 'upper center', 'bbox_to_anchor': (0.5, 1 - MARGIN)},
     'TR1': {'loc': 'upper right',  'bbox_to_anchor': (1 - MARGIN, 1 - MARGIN)},
-    'ML1': {'loc': 'center left',  'bbox_to_anchor': (0 + MARGIN, 0.5 + MARGIN)},
-    'MR1': {'loc': 'center right', 'bbox_to_anchor': (1 - MARGIN, 0.5 - MARGIN)},
+    'ML1': {'loc': 'center left',  'bbox_to_anchor': (0 + MARGIN, 0.5)},
+    'MR1': {'loc': 'center right', 'bbox_to_anchor': (1 - MARGIN, 0.5)},
     'BL1': {'loc': 'lower left',   'bbox_to_anchor': (0 + MARGIN, 0 + MARGIN)},
     'BC1': {'loc': 'lower center', 'bbox_to_anchor': (0.5, 0 + MARGIN)},
     'BR1': {'loc': 'lower right',  'bbox_to_anchor': (1 - MARGIN, 0 + MARGIN)},
@@ -50,8 +50,8 @@ LEGEND_PLACEMENT_CODES = {
     # --- OUTSIDE AXES (Center Edges) ---
     'TC2': {'loc': 'lower center', 'bbox_to_anchor': (0.5, 1 + MARGIN)},
     'BC2': {'loc': 'upper center', 'bbox_to_anchor': (0.5, 0 - MARGIN)},
-    'ML2': {'loc': 'center right', 'bbox_to_anchor': (0 - MARGIN, 0.5 + MARGIN)},
-    'MR2': {'loc': 'center left',  'bbox_to_anchor': (1 + MARGIN, 0.5 - MARGIN)},
+    'ML2': {'loc': 'center right', 'bbox_to_anchor': (0 - MARGIN, 0.5)},
+    'MR2': {'loc': 'center left',  'bbox_to_anchor': (1 + MARGIN, 0.5)},
 
     # --- OUTSIDE AXES (Corner Adjacents) ---
     # Anchored at (0, 1) - Top-Left Corner
@@ -110,7 +110,7 @@ def get_text_position_vals(label_pos: str) -> Tuple[Tuple[float, float], str, st
     return pos, ha, va
 
 
-def get_add_plotlabel_pm() -> ParamManager:
+def get_add_plotlabel_pm(update: Dict = None) -> ParamManager:
     """
     Gets a ParamManager for adding a text label to a plot corner.
 
@@ -154,10 +154,13 @@ def get_add_plotlabel_pm() -> ParamManager:
     
     pm = ParamManager(defaults, func=func, error_on=error_on)
 
+    if update is not None:
+        pm.update_defaults(update)
+
     return pm
 
 
-def get_add_label_scatter_pm() -> ParamManager:
+def get_add_label_scatter_pm(update: Dict = None) -> ParamManager:
     """
     Gets a ParamManager for adding labels to scatter plot centroids.
 
@@ -206,10 +209,13 @@ def get_add_label_scatter_pm() -> ParamManager:
     
     pm = ParamManager(defaults, func=func, error_on=error_on)
 
+    if update is not None:
+        pm.update_defaults(update)
+
     return pm
 
 
-def get_add_cbar_pm() -> ParamManager:
+def get_add_cbar_pm(update: Dict = None) -> ParamManager:
     """
     Gets a ParamManager for adding a colorbar to a plot.
 
@@ -242,10 +248,13 @@ def get_add_cbar_pm() -> ParamManager:
     
     pm = ParamManager(defaults, func=func, error_on=error_on)
 
+    if update is not None:
+        pm.update_defaults(update)
+
     return pm
 
 
-def get_add_legend_pm() -> ParamManager:
+def get_add_legend_pm(update: Dict = None) -> ParamManager:
     """
     Gets a ParamManager for adding a legend to a plot.
 
@@ -316,10 +325,13 @@ def get_add_legend_pm() -> ParamManager:
     
     pm = ParamManager(defaults, func=func, error_on=error_on)
 
+    if update is not None:
+        pm.update_defaults(update)
+
     return pm
 
 
-def get_pm(plot_type: str) -> ParamManager:
+def get_pm(plot_type: str, **kwargs) -> ParamManager:
     """
     Get the ParamManager for a specific plot decoration type.
 
@@ -330,6 +342,8 @@ def get_pm(plot_type: str) -> ParamManager:
     ----------
     plot_type : {'plot_label', 'label_scatter', 'cbar', 'legend'}
         The type of plot decoration.
+    **kwargs
+        Additional arguments required by the specific ParamManager function.
 
     Returns
     -------
@@ -343,16 +357,16 @@ def get_pm(plot_type: str) -> ParamManager:
     """
     
     pm_dict = {
-        'plot_label': get_add_plotlabel_pm(),
-        'label_scatter': get_add_label_scatter_pm(),
-        'cbar': get_add_cbar_pm(),
-        'legend': get_add_legend_pm()
+        'plot_label': get_add_plotlabel_pm,
+        'label_scatter': get_add_label_scatter_pm,
+        'cbar': get_add_cbar_pm,
+        'legend': get_add_legend_pm
     }
     
     if plot_type not in pm_dict:
         raise ValueError(f"Invalid plot_type: {plot_type}. Must be one of {list(pm_dict.keys())}.")
     
-    return pm_dict[plot_type]
+    return pm_dict[plot_type](**kwargs)
 
 
 def decorate_scatter(ax: plt.Axes,

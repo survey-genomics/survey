@@ -5,6 +5,7 @@ from typing import (
     Optional, Union, Dict, Callable, Any, List, Tuple
 )
 import warnings
+import itertools as it
 
 # Standard libs
 import numpy as np
@@ -316,7 +317,7 @@ def arrplot(mdata: md.MuData,
         return ax
     
 
-    def _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, layer, lims, dtypes, cbar, plot_label, configs, lerper):
+    def _add_wells(masked_mdata, wells, thresh, chip, ax, cmap, norm, color, layer, lims, dtypes, cbar, plot_label, configs, lerper, plot):
 
         center = [np.mean(v) for k, v in lims.items()]
 
@@ -363,19 +364,20 @@ def arrplot(mdata: md.MuData,
                                  "colors or mappable to colors.")
             
             verts = {id: [lerper(p) for p in v] for id, v in chip.array.verts.items() if id in wells.index}
+            
+            if plot:
+                for id, fc in well_colors.items():
+                    poly = mpl.patches.Polygon(verts[id], closed=True, facecolor=fc,
+                                            edgecolor=None, linewidth=0)
+                    ax.add_patch(poly)
+            
+                if cbar and dtypes['color']['type'] == 'num':
+                    center = np.array([center, center]).T
+                    scpc = ax.scatter(*center, c=[wells.min(), wells.max()], cmap=cmap, norm=norm, s=0)
+                    ax = decorate_scatter(ax, config=configs['cbar'], plot_type='cbar', scpc=scpc, fig=ax.figure)
                 
-            for id, fc in well_colors.items():
-                poly = mpl.patches.Polygon(verts[id], closed=True, facecolor=fc,
-                                           edgecolor=None, linewidth=0)
-                ax.add_patch(poly)
-            
-            if cbar and dtypes['color']['type'] == 'num':
-                center = np.array([center, center]).T
-                scpc = ax.scatter(*center, c=[wells.min(), wells.max()], cmap=cmap, norm=norm, s=0)
-                ax = decorate_scatter(ax, config=configs['cbar'], plot_type='cbar', scpc=scpc, fig=ax.figure)
-            
-            if plot_label:
-                ax = decorate_scatter(ax, config=configs['plot_label'], plot_type='plot_label', label=color)
+                if plot_label:
+                    ax = decorate_scatter(ax, config=configs['plot_label'], plot_type='plot_label', label=color)
         else:
             raise ValueError('Param `wells` must be a callable function, a dict, or a pd.Series')
         return ax, wells
@@ -418,13 +420,14 @@ def arrplot(mdata: md.MuData,
         raise ValueError("Invalid units. Only 'm' or 'w' is supported.")
 
     # Get Axes object and set limits
-    if ax is None:
+    if plot and ax is None:
         ar = (np.subtract(*lims['x'])/np.subtract(*lims['y']))
         fig, ax = subplots(1, fss=fss, ar=ar)
 
-    ax.set_xlim(lims['x'])
-    ax.set_ylim(lims['y'])
-    ax.grid(False)
+    if plot:
+        ax.set_xlim(lims['x'])
+        ax.set_ylim(lims['y'])
+        ax.grid(False)
 
     # Determine data types for coloring, check cmap if numeric
     dtypes = determine_data(masked_mdata, color=color, basis=basis)
@@ -456,7 +459,7 @@ def arrplot(mdata: md.MuData,
     if wells is not None:
         ax, welldata = _add_wells(masked_mdata, wells, thresh, chip, ax, 
                                   cmap, norm, color, layer, lims, dtypes, 
-                                  cbar, plot_label, configs, lerper)
+                                  cbar, plot_label, configs, lerper, plot)
     if not plot:
         return welldata
     
@@ -464,15 +467,16 @@ def arrplot(mdata: md.MuData,
     if invert:
         ax.set_facecolor('black')
 
-    ax.set_xlabel(f'{basis.upper()}1')
-    ax.set_ylabel(f'{basis.upper()}2')
-    
-    # Remove grid, ticks, and tick labels
-    ax.grid(False)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
+    if plot:
+        ax.set_xlabel(f'{basis.upper()}1')
+        ax.set_ylabel(f'{basis.upper()}2')
+        
+        # Remove grid, ticks, and tick labels
+        ax.grid(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
 
     if return_welldata:
         return ax, welldata
@@ -541,8 +545,11 @@ def cellmap(mdata: md.MuData,
         else:
             cats_show = None
 
-        default_legend_params = {'loc': 'lower right', 'bbox_to_anchor': (1, 0), 'show_all_cats': cats_show}
         if 'legend_params' in kwargs:
+            if 'pos' in kwargs['legend_params']:
+                default_legend_params = {'pos': 'BR1', 'show_all_cats': cats_show}
+            else:
+                default_legend_params = {'loc': 'lower right', 'bbox_to_anchor': (1, 0), 'show_all_cats': cats_show}
             kwargs['legend_params'] = get_config(kwargs['legend_params'], default_legend_params)
 
         supplied_scatter_params = ['data', 'color', 'basis', 'ax', 'plot_data', 'layer']
@@ -951,3 +958,87 @@ def segplot(mdata: md.MuData,
 
     return axes
 
+
+def get_vertices(mdata, chipnum, method='printed', xy=None, context=0):
+    """
+    Get the vertices of a rectangular region on a chip.
+
+    Parameters
+    ----------
+    mdata : AnnData
+        Annotated data matrix.
+    chipnum : int
+        Chip identifier.
+    method : str, optional
+        Method to determine the vertices. Must be either 'printed' or 'ids'.
+        Default is 'printed'.
+    xy : tuple of int, optional
+        Coordinates (arr-x, arr-y) to use when method is 'ids'. Default is None.
+    context : int, optional
+        Context size to use when method is 'ids'. Default is 0.
+
+    Returns
+    -------
+    ids : list
+        List of IDs of the vertices.
+    extent : list of pd.Series
+        Extent of the vertices.
+    verts : np.ndarray
+        Array of vertices coordinates.
+    lims : np.ndarray
+        Limits of the vertices.
+
+    Raises
+    ------
+    ValueError
+        If `method` is not 'printed' or 'ids'.
+        If `xy` is not None when `method` is 'printed'.
+
+    Notes
+    -----
+    This function calculates the vertices of a rectangular region on a chip
+    based on the specified method. If `method` is 'printed', the vertices are
+    determined based on the printed spots on the chip. If `method` is 'ids',
+    the vertices are determined based on the specified coordinates and context.
+
+    Examples
+    --------
+    >>> ids, extent, verts, lims = get_vertices(mdata, 'chip1', method='printed')
+    >>> ids, extent, verts, lims = get_vertices(mdata, 'chip1', method='ids', xy=(10, 10), context=2)
+    """
+
+    # Validate inputs
+    validate_spatial_mdata(mdata)
+    chipset = mdata['xyz'].uns['survey']
+    chipnums = validate_chipnums(chipset, chipnum)
+    if len(chipnums) > 1:
+        raise ValueError("Only one chip number is allowed.")
+    chipnum = chipnums[0]
+
+    chip = chipset.chips[chipnum]
+    chipmap = chip.get_welldata().reset_index()
+    
+    if method == 'printed':
+        if xy is not None:
+            raise ValueError('`xy` must be None when `method` is "printed"')
+        ids = []
+        extent = chipmap[['arr-x', 'arr-y']][~chipmap['barcode'].isna()].min(0), chipmap[['arr-x', 'arr-y']][~chipmap['barcode'].isna()].max(0)
+        for x, y in [extent[0].values, (extent[0]['arr-x'], extent[1]['arr-y']), extent[1].values, (extent[1]['arr-x'], extent[0]['arr-y'])]:
+            ids.append(chipmap.set_index(['arr-x', 'arr-y']).loc[(x, y), 'id'])
+    elif method == 'ids':
+        x, y = xy
+        ids = chipmap[chipmap['arr-x'].isin(range(x - context, x + context + 1)) & chipmap['arr-y'].isin(range(y - context, y + context + 1))]['id'].values
+        extent = chipmap[['arr-x', 'arr-y']][chipmap['id'].isin(ids)].agg(['min', 'max']).values
+        extent = [pd.Series(i, index=['arr-x', 'arr-y']) for i in extent]
+    else:
+        raise ValueError('`method` must be "printed" or "ids"')
+
+    pre_verts = np.concatenate([chip.array.verts[id] for id in ids])
+
+    lims = np.vstack([pre_verts.min(0), pre_verts.max(0)]).T
+    verts = np.array(list(it.product(*lims)))
+
+    # Put in order that makes a Patch rectangle
+    verts = verts[[0, 1, 3, 2]]
+
+    return ids, extent, verts, lims

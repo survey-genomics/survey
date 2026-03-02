@@ -1,7 +1,7 @@
 # Built-ins
 import os
 import re
-from typing import Dict, Tuple, Union, Optional
+from typing import Dict, Tuple, Union, Optional, List
 from pathlib import Path
 
 # Standard libs
@@ -313,3 +313,232 @@ class SurveyPaths:
         
         return h5_paths
 
+# # Not sure what this was for?
+# def update_cell_type_annotations(
+#     mdata: md.MuData,
+#     cttypes: List[str],
+#     ct_annots_path: Path,
+#     ct_meta_path: Path
+# ) -> None:
+#     """
+#     Update cell type annotations across modalities in a MuData object.
+    
+#     This function updates cell type annotations by:
+#     1. Detecting existing cell type columns across all modalities
+#     2. Removing detected columns in non-RNA modalities after user confirmation
+#     3. Loading new annotations and applying them to the RNA modality
+#     4. Updating metadata in the RNA modality
+#     5. Transferring annotations to other modalities
+    
+#     Parameters
+#     ----------
+#     mdata : md.MuData
+#         MuData object containing multiple modalities.
+#     cttypes : list of str
+#         List of cell type column names to update (e.g., ['ct1', 'ct2', 'ct3']).
+#     ct_annots_path : Path
+#         Path to CSV file containing cell type annotations with index matching 
+#         observation names.
+#     ct_meta_path : Path
+#         Path to pickle file containing metadata dictionary for cell type columns.
+#         Must contain all cttypes as keys.
+    
+#     Raises
+#     ------
+#     ValueError
+#         If 'rna' modality doesn't exist, if chained modality prefixes are detected,
+#         if cttypes are missing from metadata file, or if user cancels the operation.
+#     FileNotFoundError
+#         If annotation or metadata files don't exist.
+    
+#     Notes
+#     -----
+#     The function detects columns matching patterns:
+#     - `<cttype>` (direct column)
+#     - `<mod>.<cttype>` (transferred column from another modality)
+    
+#     Chained patterns like `xyz.rna.ct3` will raise an error.
+
+    
+#     Metadata file should have been created with the following:
+#     ```
+#     paths['ctmeta'] = paths['data'] / 'general/pkls/tmp-ct-meta.pkl'
+#     cttypes = ['ct1', 'ct2', 'ct3']
+#     ctmeta = {}
+#     for cttype in cttypes:
+#         ctmeta[cttype] = mdata['rna'].uns['meta'][cttype].copy()
+#     pklop(ctmeta, paths['ctmeta'])
+#     ```
+    
+#     Examples
+#     --------
+#     >>> from pathlib import Path
+#     >>> update_cell_type_annotations(
+#     ...     mdata,
+#     ...     cttypes=['ct1', 'ct2', 'ct3'],
+#     ...     ct_annots_path=Path('data/ct-annots.csv'),
+#     ...     ct_meta_path=Path('data/ct-meta.pkl')
+#     ... )
+#     """
+#     import re
+#     from survey.genutils import pklop
+    
+#     print("=" * 80)
+#     print("CELL TYPE ANNOTATION UPDATE")
+#     print("=" * 80)
+    
+#     # Check that RNA modality exists
+#     print("\n[1/8] Validating modalities...")
+#     if 'rna' not in mdata.mod.keys():
+#         raise ValueError("The 'rna' modality must exist in the MuData object.")
+#     print("  ✓ RNA modality found")
+    
+#     # Check that cttypes columns exist in RNA modality
+#     print("\n[2/8] Validating cttype columns in RNA modality...")
+#     missing_columns = [ct for ct in cttypes if ct not in mdata['rna'].obs.columns]
+#     if missing_columns:
+#         raise ValueError(
+#             f"The following cttype columns are missing from RNA modality: {missing_columns}"
+#         )
+#     print(f"  ✓ All cttype columns found: {cttypes}")
+    
+#     # Check that files exist
+#     print("\n[3/8] Validating input files...")
+#     if not ct_annots_path.exists():
+#         raise FileNotFoundError(f"Annotations file not found: {ct_annots_path}")
+#     if not ct_meta_path.exists():
+#         raise FileNotFoundError(f"Metadata file not found: {ct_meta_path}")
+#     print(f"  ✓ Annotations file: {ct_annots_path}")
+#     print(f"  ✓ Metadata file: {ct_meta_path}")
+    
+#     # Load and validate metadata
+#     print("\n[4/8] Loading metadata...")
+#     ct_meta = pklop(ct_meta_path)
+#     missing_cttypes = [ct for ct in cttypes if ct not in ct_meta.keys()]
+#     if missing_cttypes:
+#         raise ValueError(
+#             f"The following cttypes are missing from metadata file: {missing_cttypes}"
+#         )
+#     print(f"  ✓ Metadata loaded with keys: {list(ct_meta.keys())}")
+    
+#     # Detect existing cell type columns across all modalities
+#     print("\n[5/8] Detecting existing cell type columns...")
+    
+#     # Pattern: either direct column name or <mod>.<cttype>
+#     # NOT allowing chained like xyz.rna.ct3
+#     pattern = re.compile(r'^(?:([a-z]{3})\.)?(' + '|'.join(re.escape(ct) for ct in cttypes) + ')$')
+    
+#     detected_cols = {}  # {modality: [columns_to_remove]}
+    
+#     for mod in mdata.mod.keys():
+#         detected_cols[mod] = []
+#         for col in mdata[mod].obs.columns:
+#             match = pattern.match(col)
+#             if match:
+#                 prefix, cttype = match.groups()
+                
+#                 # Check for chained modality (e.g., xyz.rna.ct3)
+#                 if prefix and '.' in prefix:
+#                     raise ValueError(
+#                         f"Detected chained modality prefix in column '{col}' "
+#                         f"in modality '{mod}'. This is not supported."
+#                     )
+                
+#                 detected_cols[mod].append(col)
+    
+#     # Filter out modalities with no detected columns
+#     detected_cols = {mod: cols for mod, cols in detected_cols.items() if cols}
+    
+#     if not detected_cols:
+#         print("  ℹ No existing cell type columns detected")
+#     else:
+#         print("  ⚠ Detected cell type columns:")
+#         for mod, cols in detected_cols.items():
+#             print(f"    - {mod}: {cols}")
+    
+#     # Confirm removal with user
+#     if detected_cols:
+#         print("\n[6/8] Confirming column removal...")
+#         # Filter out RNA modality from removal
+#         cols_to_remove = {mod: cols for mod, cols in detected_cols.items() if mod != 'rna'}
+        
+#         if not cols_to_remove:
+#             print("  ℹ Only RNA modality columns detected, skipping removal...")
+#         else:
+#             print("  ⚠ Will remove columns from non-RNA modalities:")
+#             for mod, cols in cols_to_remove.items():
+#                 print(f"    - {mod}: {cols}")
+            
+#             response = input("  Remove all detected columns from non-RNA modalities? (yes/no): ").strip().lower()
+#             if response not in ['yes', 'y']:
+#                 raise ValueError("Operation cancelled by user.")
+            
+#             # Remove detected columns (excluding RNA)
+#             print("  Removing columns...")
+#             for mod, cols in cols_to_remove.items():
+#                 mdata[mod].obs.drop(columns=cols, inplace=True)
+#                 print(f"    ✓ Removed from {mod}: {cols}")
+#     else:
+#         print("\n[6/8] No columns to remove, skipping...")
+    
+#     # Load annotations and apply to RNA modality
+#     print("\n[7/8] Updating RNA modality annotations...")
+#     ctannots = pd.read_csv(ct_annots_path, index_col=0)
+#     print(f"  ✓ Loaded annotations with shape: {ctannots.shape}")
+    
+#     for cttype in cttypes:
+#         print(f"  - Updating {cttype}...")
+#         mdata['rna'].obs[cttype] = mdata['rna'].obs[cttype].astype(str)
+#         mdata['rna'].obs.update(ctannots[[cttype]])
+#         mdata['rna'].obs[cttype] = mdata['rna'].obs[cttype].astype('category')
+#         print(f"    ✓ {cttype} updated")
+    
+#     # Update metadata in RNA modality
+#     print("  - Updating metadata...")
+#     if 'meta' not in mdata['rna'].uns:
+#         mdata['rna'].uns['meta'] = {}
+    
+#     for cttype in cttypes:
+#         # Remove old metadata if it exists
+#         if cttype in mdata['rna'].uns['meta']:
+#             del mdata['rna'].uns['meta'][cttype]
+#         # Add new metadata
+#         mdata['rna'].uns['meta'][cttype] = ct_meta[cttype]
+#         print(f"    ✓ Metadata updated for {cttype}")
+    
+#     # Transfer to other modalities
+#     print("\n[8/8] Transferring annotations to other modalities...")
+    
+#     # Get list of modalities that need transfer (excluding RNA)
+#     target_mods = [mod for mod in detected_cols.keys() if mod != 'rna']
+    
+#     if not target_mods:
+#         print("  ℹ No other modalities detected, skipping transfer")
+#     else:
+#         for target_mod in target_mods:
+#             print(f"  - Transferring to {target_mod}...")
+#             svc.obs.transfer_obs(
+#                 mdata, 
+#                 mods=('rna', target_mod), 
+#                 columns=cttypes, 
+#                 meta=True
+#             )
+#             print(f"    ✓ Transfer complete")
+    
+#     print("\n" + "=" * 80)
+#     print("UPDATE COMPLETE")
+#     print("=" * 80)
+
+# # See Docstring Notes on how the metadata file should be created
+
+# # Usage
+# paths['ctannots'] = paths['ct_annots'] = paths['data'] / f'general/vals/{tissue}/ct-annots.csv'
+# paths['ctmeta'] = paths['data'] / 'general/pkls/tmp-ct-meta.pkl'
+# cttypes = ['ct1', 'ct2', 'ct3']
+
+# update_cell_type_annotations(
+#     mdata,
+#     cttypes=cttypes,
+#     ct_annots_path=paths['ctannots'],
+#     ct_meta_path=paths['ctmeta']
+# )
