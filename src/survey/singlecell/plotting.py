@@ -599,7 +599,7 @@ def labeled_scatter(data: Union[sc.AnnData, md.MuData],
             cdict_legend = dict(zip(new_index_legend, [cdict[i] for i in centroids.index]))
             if configs['legend']['show_all_cats'] is not None:
                 mapper = dict(zip(centroids.index, new_index_legend))
-                configs['legend']['show_all_cats'] = configs['legend']['show_all_cats'].map(mapper)
+                configs['legend']['show_all_cats'] = [mapper[i] for i in configs['legend']['show_all_cats']]
         centroids.index = new_index_labeled
 
     # Plot the centroids with labels
@@ -858,7 +858,7 @@ def plot_features(data: Union[sc.AnnData, md.MuData],
     elif is_listlike(features):
         feature_set = features
         if isinstance(feature_set, pd.Series):
-            feature_set = pd.Series.values
+            feature_set = feature_set.values
         figs_axes = _plotter(feature_set)
     else:
         raise ValueError('Features must be a dict or list-like')
@@ -1490,10 +1490,13 @@ class Ridge:
                         ax.fill_between(x_grid, kde_values_scaled, color=hue_color, alpha=alpha, zorder=i)
 
             if legend:
-                adjusted_default_legend_params = {'bbox_to_anchor': (1, 0), 'loc': 'lower right', 
-                                                  'title': self.hue if self.hue else None, 'title_fontsize': 8}
-                default_legend_params = get_pm('legend').get_params(adjusted_default_legend_params)
-                config = get_config(legend_params, default_legend_params)
+                update_legend_defaults = {'bbox_to_anchor': (1, 0), 'loc': 'lower right'}
+                default_config = {'title': self.hue if self.hue else None, 'title_fontsize': 8}
+
+                default_legend_pm = get_pm('legend', update=update_legend_defaults)
+                preconfig = default_legend_pm.get_params(legend_params)
+                config = get_config(preconfig, default_config)
+                
                 if self.hue:
                     cdict = dict(zip(hue_values, hue_colors))
                     ax = decorate_scatter(ax, plot_type='legend', config=config, cdict=cdict)
