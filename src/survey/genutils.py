@@ -557,6 +557,31 @@ class ParamManager:
                         
                 if should_error:
                     raise ValueError(f"Parameter conflict: {message}")
+        
+        return
+
+    def update_defaults(self, new_defaults: Dict) -> None:
+        """
+        Updates only the 'value' in the defaults dictionary.
+
+        Parameters
+        ----------
+        new_defaults : dict
+            The new defaults dictionary to set.
+        """
+        missing = []
+        for name, value in new_defaults.items():
+            if name in self.defaults:
+                self.defaults[name]['value'] = value
+            else:
+                missing.append(name)
+        
+        if len(missing) > 0:
+            raise ValueError(f"Keys {', '.join(missing)} not found in existing defaults, please"
+                                " create a new ParamManager instance or add additional configurations "
+                                "with get_config().")
+        
+        return
                 
 
 def get_mask(df: pd.DataFrame, filters: Dict[str, List]) -> pd.Series:
