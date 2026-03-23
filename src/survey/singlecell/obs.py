@@ -11,7 +11,10 @@ import mudata as md
 
 # Survey libs
 from survey.genutils import is_listlike
-from survey.singlecell.meta import key_exists, get_key_props, transfer_meta
+from survey.singlecell.meta import (
+    key_exists, get_key_props, 
+    reset_meta_keys, transfer_meta
+)
 
 
 def get_obs_df(data: Union[sc.AnnData, md.MuData],
@@ -249,7 +252,10 @@ def transfer_obs(mdata: md.MuData,
     if meta:
 
         key_props = get_key_props(mdata, mods, keys=columns, props=props)
-                
+
+        # Reset the keys so they match
+        reset_meta_keys(mdata[mods[1]], keys=[f"{mods[0]}.{col}" for col in columns])
+        
         for k in key_props:
             for prop in key_props[k]:
                 transfer_meta(mdata, mods, k, prop)

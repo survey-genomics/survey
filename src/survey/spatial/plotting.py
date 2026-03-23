@@ -377,19 +377,6 @@ def arrplot(mdata: md.MuData,
 
             if dilation is not None:
                 verts = resize_square_vertices(verts, dilation)
-
-            for id, fc in well_colors.items():
-                poly = mpl.patches.Polygon(verts[id], closed=True, facecolor=fc,
-                                           edgecolor=None, linewidth=0)
-                ax.add_patch(poly)
-            
-            if cbar and dtypes['color']['type'] == 'num':
-                center = np.array([center, center]).T
-                scpc = ax.scatter(*center, c=[wells.min(), wells.max()], cmap=cmap, norm=norm, s=0)
-                ax = decorate_scatter(ax, config=configs['cbar'], plot_type='cbar', scpc=scpc, fig=ax.figure)
-            
-            if plot_label:
-                ax = decorate_scatter(ax, config=configs['plot_label'], plot_type='plot_label', label=color)
             
             if plot:
                 for id, fc in well_colors.items():

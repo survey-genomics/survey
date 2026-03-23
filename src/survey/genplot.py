@@ -11,11 +11,13 @@ from numbers import Number
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.widgets import RectangleSelector
 import seaborn as sns
 from PIL import Image
 
 # Survey libs
 from survey.genutils import make_logspace, get_config
+
 
 inverted_rcparams = {
     # Figure
@@ -638,6 +640,7 @@ def add_heatmap_frames(ax, mask, color='cyan', linewidth=2):
     
     return ax
 
+
 def create_alpha_cmap(base_cmap, alpha=None, scale_alpha=False):
     """
     Create a colormap with specified alpha transparency.
@@ -686,3 +689,148 @@ def create_alpha_cmap(base_cmap, alpha=None, scale_alpha=False):
         colors[:, -1] = np.linspace(0, 1.0, 256)
     
     return mpl.colors.LinearSegmentedColormap.from_list(f'{cmap_name}_alpha', colors)
+
+
+class BoundingBoxSelector:
+    """Interactive bounding box selector for matplotlib axes.
+    
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The axes to draw the bounding box on
+    
+    Attributes
+    ----------
+    bbox : dict or None
+        The bounding box coordinates as {'x': (xmin, xmax), 'y': (ymin, ymax)} in axes coordinates.
+        None if no box has been drawn yet.
+    """
+    
+    def __init__(self, ax, return_square=False):
+
+        def on_select(eclick, erelease):
+            self.on_select(eclick, erelease, return_square)
+            
+        self.ax = ax
+        self.lims = [ax.get_xlim(), ax.get_ylim()]
+        self.bbox = None
+        self.selector = RectangleSelector(
+            self.ax,
+            on_select, 
+            useblit=True,
+            button=[1],  # Left mouse button
+            minspanx=5,
+            minspany=5,
+            spancoords='pixels',
+            interactive=True,
+            props=dict(facecolor='red', edgecolor='red', alpha=0.3, fill=True, linewidth=2)
+        )
+        
+    def on_select(self, eclick, erelease, return_square=False):
+        """Callback for when a region is selected."""
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+        
+        # Store bounding box coordinates as ranges
+        self.bbox = {
+            'x': (min(x1, x2), max(x1, x2)),
+            'y': (min(y1, y2), max(y1, y2))
+        }
+        if return_square:
+            self.bbox['x'], self.bbox['y'] = self.make_square(self.bbox, self.lims)
+        print(f"Bounding box selected: {self.bbox}")
+    
+    def get_bbox(self):
+        """Return the current bounding box coordinates."""
+        return self.bbox
+    
+    def disconnect(self):
+        """Disconnect the selector."""
+        self.selector.set_active(False)
+
+    @staticmethod
+    def make_square(bbox_dict, lims):
+        x0, x1 = bbox_dict['x']
+        y0, y1 = bbox_dict['y']
+        xcen = (x0 + x1) / 2
+        ycen = (y0 + y1) / 2
+        width = max(x1 - x0, y1 - y0)
+        new_x0 = max(xcen - width/2, lims[0][0])
+        new_x1 = min(xcen + width/2, lims[0][1])
+        new_y0 = max(ycen - width/2, lims[1][0])
+        new_y1 = min(ycen + width/2, lims[1][1])
+        return [new_x0, new_x1], [new_y0, new_y1]
+
+
+def color_viz(palette, ncols=10, show_numbers=True, marker_size=500, text_size=10, figsize=None):
+    """
+    Visualize a color palette as a grid of scatter points.
+    
+    Parameters
+    ----------
+    palette : list-like
+        List of colors to visualize (can be hex strings, RGB tuples, named colors, etc.)
+    ncols : int, optional
+        Number of colors per row before wrapping to next line (default: 10)
+    show_numbers : bool, optional
+        Whether to display the index number on each color point (default: True)
+    marker_size : float, optional
+        Size of scatter markers (default: 500)
+    text_size : float, optional
+        Font size for index labels (default: 10)
+    figsize : tuple, optional
+        Figure size (width, height). If None, auto-calculated based on ncols and nrows
+    
+    Returns
+    -------
+    fig, ax : matplotlib figure and axis objects
+    """
+    n_colors = len(palette)
+    nrows = int(np.ceil(n_colors / ncols))
+    
+    # Auto-calculate figure size if not provided
+    if figsize is None:
+        figsize = (ncols * 0.8, nrows * 0.8)
+    
+    # Create coordinates for each color
+    x_coords = []
+    y_coords = []
+    colors = []
+    
+    for i, color in enumerate(palette):
+        row = i // ncols
+        col = i % ncols
+        x_coords.append(col)
+        y_coords.append(nrows - 1 - row)  # Top to bottom
+        colors.append(color)
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.scatter(x_coords, y_coords, c=colors, s=marker_size, marker='o')
+    
+    # Add text labels if requested
+    if show_numbers:
+        for i, (x, y, color) in enumerate(zip(x_coords, y_coords, colors)):
+            # Add a check to make sure the color is a hex string for contrast calculation
+            if isinstance(color, str) and color.startswith('#'):
+                pass
+            else:
+                # If not a hex string, convert to hex using matplotlib's color conversion
+                try:
+                    color = mpl.colors.to_hex(color)
+                except ValueError:
+                    color = '#000000'  # Default to black if conversion fails
+            text_color = get_contrast_color(color)
+            ax.text(x, y, str(i), ha='center', va='center', 
+                   color=text_color, fontsize=text_size, weight='bold')
+    
+    # Clean up the plot
+    ax.set_xlim(-0.5, ncols - 0.5)
+    ax.set_ylim(-0.5, nrows - 0.5)
+    ax.set_aspect('equal')
+    ax.axis('off')
+    
+    plt.tight_layout()
+    
+    return fig, ax
+
