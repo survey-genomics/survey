@@ -17,6 +17,7 @@ import mudata as md
 # Survey libs
 from survey.singlecell.scutils import QuietScanpyLoad, filter_var
 from survey.genutils import get_config, pklop, is_listlike
+from survey.singlecell.iohelp import extract_cb_h5
 
 ADATA_SUFFIX = '.h5ad'
 MDATA_SUFFIX = '.h5mu'
@@ -258,8 +259,7 @@ class CellrangerOutdir:
     """
 
     def __init__(self, 
-                 path_to_crout: Union[str, Path],
-                 metrics: bool = False) -> None:
+                 path_to_crout: Union[str, Path]) -> None:
         if not isinstance(path_to_crout, Path):
             path_to_crout = Path(path_to_crout)
         
