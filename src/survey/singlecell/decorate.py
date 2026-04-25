@@ -438,12 +438,13 @@ def decorate_scatter(ax: plt.Axes,
         
         label_size = config.pop('label_size')
         label_color = config.pop('label_color')
+        fmt = config.pop('fmt', '{:.2f}')
 
         cax, yadjust_pos, ytick_params = cbar_in_axes(fig, ax, cax=None, **config)
 
         colorbar = plt.colorbar(scpc, cax=cax)
 
-        cax.set_yticks([colorbar.vmax*yadjust_pos], labels=["{:.2f}".format(colorbar.vmax)], 
+        cax.set_yticks([colorbar.vmax*yadjust_pos], labels=[fmt.format(colorbar.vmax)], 
                        size=label_size, va='top', color=label_color)
         
         cax.tick_params(axis='y', which='both', size=0, **ytick_params)

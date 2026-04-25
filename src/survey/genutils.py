@@ -863,3 +863,11 @@ def blockprint(listlike: list, width: int = 60) -> None:
         raise TypeError("Input must be list-like.")
     print('\n'.join(textwrap.wrap(', '.join(list(map(str,listlike))), width=width)))
 
+
+def get_attrs(obj, public=1):
+    if public == 0:
+        return dir(obj)
+    elif public == 1:
+        return [name for name in dir(obj) if not name.startswith('_')]
+    elif public == 2:
+        return [name for name in dir(obj) if not name.startswith('_') and not name.endswith('_')]

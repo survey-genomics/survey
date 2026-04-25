@@ -21,8 +21,11 @@ import mudata as md
 # Survey libs
 from survey.genplot import subplots
 from survey.singlecell import meta
+from survey.singlecell.obs import get_obs_df
+from survey.singlecell.io import read_data as io_read_data
+from survey.singlecell.io2 import read_data as io2_read_data
 from survey.spatial.core import Chip, ChipSet
-from survey.genutils import is_listlike, get_config
+from survey.genutils import is_listlike, get_config, pklop
 from survey.genplot import create_gif_from_pngs
 
 
@@ -532,6 +535,30 @@ class SpatialNormalizer:
 
         self.all_donors = self.get_possible_donors()
 
+
+    def __getstate__(self):
+        # Copy the object's state from self.__dict__
+        state = self.__dict__.copy()
+        # Remove the large object references
+        if 'mdata' in state:
+            del state['mdata']
+        return state
+
+
+    def __setstate__(self, state):
+        # Restore instance attributes
+        self.__dict__.update(state)
+        # Re-initialize the large objects to None or reload them
+        self.mdata = None
+
+
+    def __repr__(self):
+        return f"SpatialNormalizer(chip={self.chip.num}, bctypes={self.bctypes}, max_dist={self.max_dist})"
+
+
+    def __str__(self):
+        return f"SpatialNormalizer for Chip {self.chip.num} with barcode types {self.bctypes}"
+
     @property
     def sorted_bcids(self) -> Dict[int, pd.Series]:
         """
@@ -894,6 +921,12 @@ class SpatialCaller:
                 'add_calls': False,
             }
 
+        def __repr__(self):
+            return f"CallResults(run={self.run})"
+
+        def __str__(self):
+            return f"CallResults with status: {self.run}"
+
         def reset(self, state):
 
             if state == 'metrics':
@@ -928,6 +961,34 @@ class SpatialCaller:
         self.spmods = None
         self.metrics = None
         self.spatial = self.CallResults()
+
+
+    def __getstate__(self):
+        # Copy the object's state from self.__dict__
+        state = self.__dict__.copy()
+        # Remove the large object references
+        if 'mdata' in state:
+            del state['mdata']
+        if self.spatial.run['add_mods'] and 'spmods' in state:
+            del state['spmods']
+
+        return state
+
+
+    def __setstate__(self, state):
+        # Restore instance attributes
+        self.__dict__.update(state)
+        # Re-initialize the large objects to None or reload them
+        self.mdata = None
+        self.spmods = None
+
+
+    def __repr__(self):
+        return f"SpatialCaller(chip={self.chip.num}, chip_key_prop='{self.chip_key_prop}')"
+
+
+    def __str__(self):
+        return f"SpatialCaller for Chip {self.chip.num}"
 
 
     def reset(self, state=None):
@@ -1536,21 +1597,44 @@ class SpatialPositioner:
         def __init__(self):
             self.coords = None
             self.meta = None
-            self.adata = None
+            # self.adata = None
             self.run = {
                 'add_meta': False,
                 'add_coords': False,
                 'add_xyz': False,
             }
 
+        def __repr__(self):
+            return f"PositionResults(run={self.run})"
+
+        def __str__(self):
+            return f"PositionResults with status: {self.run}"
+
+
+        def __getstate__(self):
+            # Copy the object's state from self.__dict__
+            state = self.__dict__.copy()
+            # Remove the large object references
+            if 'adata' in state:
+                del state['adata']
+            return state
+
+
+        def __setstate__(self, state):
+            # Restore instance attributes
+            self.__dict__.update(state)
+            # Re-initialize the large objects to None or reload them
+            self.adata = None
+
+
         def reset(self, state):
             if state == 'coords':
                 self.coords = None
                 self.run['add_coords'] = False
                 self.run['add_xyz'] = False
-                self.adata = None
+                # self.adata = None
             elif state == 'xyz':
-                self.adata = None
+                # self.adata = None
                 self.run['add_xyz'] = False
             else:
                 raise ValueError(f"Unknown state: {state}")
@@ -1586,6 +1670,30 @@ class SpatialPositioner:
         self.points_in_poly = points_in_poly
 
         self.position = self.PositionResults()
+
+
+    def __getstate__(self):
+        # Copy the object's state from self.__dict__
+        state = self.__dict__.copy()
+        # Remove the large object references
+        if 'mdata' in state:
+            del state['mdata']
+        return state
+
+
+    def __setstate__(self, state):
+        # Restore instance attributes
+        self.__dict__.update(state)
+        # Re-initialize the large objects to None or reload them
+        self.mdata = None
+
+
+    def __repr__(self):
+        return f"SpatialPositioner(chip={self.chip.num}, chip_key_prop='{self.chip_key_prop}')"
+
+
+    def __str__(self):
+        return f"SpatialPositioner for Chip {self.chip.num}"
 
 
     def add_meta(self):
@@ -1770,6 +1878,9 @@ class Survey:
         # spmods = get_spmods_dict(mdata, chipset=chipset, chip_key_prop=chip_key_prop)
         faulty_bcs, faulty_counts = get_faulty_bcs(mdata, chipset=chipset, chip_key_prop=chip_key_prop, check_thresh=check_thresh)
 
+        # Store chip value counts in the object to validate input mdata (in read_surveyor) if saved to file
+        chipvcounts = {mod: mdata[mod].obs[chip_key_prop].value_counts() for mod in chipset.bctypes}
+
         self.chip_key_prop = chip_key_prop
         self.mdata = mdata
         self.chipset = chipset
@@ -1777,7 +1888,38 @@ class Survey:
         self.faulty_counts = faulty_counts
 
         self.spatial = None
+        self.normers = {}
         self.callers = {}
+        self.positioners = {}
+        self.xyzdfs = {}
+        
+        # For saving to/loading from file
+        self.chipvcounts = chipvcounts
+        self._mdata_path = None
+
+
+    def __getstate__(self):
+        # Copy the object's state from self.__dict__
+        state = self.__dict__.copy()
+        # Remove the large object references
+        if 'mdata' in state:
+            del state['mdata']
+        return state
+
+
+    def __setstate__(self, state):
+        # Restore instance attributes
+        self.__dict__.update(state)
+        # Re-initialize the large objects to None or reload them
+        self.mdata = None
+
+
+    def __repr__(self):
+        return f"Survey(chipset={self.chipset}, chip_key_prop='{self.chip_key_prop}')"
+
+
+    def __str__(self):
+        return f"Survey object with {len(self.chipset.chips)} chips"
 
 
     def normalize_counts(self, bctypes=None):
@@ -1970,7 +2112,17 @@ class Survey:
         xyzs = []
 
         for chip in self.positioners:
-            xyzs.append(self.positioners[chip].position.xyz)
+            xyz_adata = self.positioners[chip].position.xyz
+            obs_keys = xyz_adata.obs.columns.tolist()
+            obsm_keys = list(xyz_adata.obsm.keys())
+            # var_names = xyz_adata.var_names.tolist() # not needed because var is just ['arr-x', 'arr-y'], already in obs
+            xyz_adata_df = get_obs_df(xyz_adata, obs_keys=obs_keys, obsm_keys=obsm_keys)
+
+            # Add to the list destined for mdata as well as the Survey object itself
+            xyzs.append(xyz_adata)
+            self.xyzdfs[chip] = xyz_adata_df
+            
+
         xyz = sc.concat(xyzs, uns_merge=None)
 
         ## Add the chip key property to make future usage more streamlined
@@ -1984,3 +2136,141 @@ class Survey:
             self.mdata.mod[f'sp{spidx}'] = spmods[spidx]
 
         self.mdata.update()
+
+
+def write_surveyor(surveyor, pkl_path, mdata_path=None, check_mdata_path=True, overwrite=False):
+    """
+    Save a Surveyor object to a file.
+
+    Parameters
+    ----------
+    surveyor : Survey
+        The Surveyor object to save.
+    pkl_path : str or Path
+        The path to save the pickle file containing the Surveyor object.
+    mdata_path : str or Path, optional
+        The path where the corresponding MuData file is saved. The Surveyor object will 
+        store the path to the mdata file. If None, will not store a path. Defaults to None.
+    check_mdata_path : bool, optional
+        If True, will check that the mdata_path exists before saving the Surveyor object. 
+        Defaults to True.
+    overwrite : bool, optional
+        If True, will overwrite the pickle file if it already exists. Defaults to False.
+
+    Returns
+    -------
+    None, modifies the Surveyor object in place by setting the mdata path.
+
+    Notes
+    -----
+    The Surveyor object is saved as a pickle file, but the referenced mudata file is set to None
+    and the path is stored in the Surveyor object. When loading the Surveyor object, the mdata can be 
+    loaded separately using the stored path. This is to avoid issues with pickling large objects and to allow 
+    for more flexible loading of the mdata.
+    """
+    pkl_path = Path(pkl_path)
+    pkl_path = pkl_path.with_suffix(".pkl")
+
+    if mdata_path is not None:
+        mdata_path = Path(mdata_path)
+        mdata_path = mdata_path.with_suffix(".h5mu")
+
+        if check_mdata_path:
+            if not mdata_path.exists():
+                raise FileNotFoundError(f"Mdata path {mdata_path} does not exist.")
+
+        surveyor._mdata_path = mdata_path
+    
+    if not isinstance(surveyor, Survey):
+        raise TypeError("Surveyor must be a Survey object.")
+
+    if pkl_path.exists():
+        if overwrite:
+            pklop(surveyor, pkl_path)
+        else:
+            raise FileExistsError(f"File {pkl_path} already exists. Set overwrite=True to overwrite.")
+    else:
+        pklop(surveyor, pkl_path)
+    
+    return
+
+
+def read_surveyor(path, mdata=None, mdata_path=None, use_io2=True):
+    """
+    Load a Surveyor object from a file.
+
+    Parameters
+    ----------
+    path : str or Path
+        The path to the pickle file containing the Surveyor object.
+    mdata : md.MuData, optional
+        The MuData object to load into the Surveyor. If None, will attempt to load from mdata_path. 
+        Defaults to None.
+    mdata_path : str or Path, optional
+        The path to the MuData file to load if mdata is None. Defaults to None
+
+    Returns
+    -------
+    Survey
+         The loaded Surveyor object with mdata loaded if specified.
+    """
+
+    def validate_compatibility(surveyor, mdata):
+        # Check that the value_counts for the chip key property in the mdata match those expected from the surveyor's callers
+        for mod in surveyor.chipset.bctypes:
+            chipvcount = surveyor.chipvcounts[mod]
+            try:
+                mdata_mod = mdata[mod]
+            except KeyError:
+                raise KeyError(f"Modality {mod} not found in mdata. Please check your mdata and surveyor object.")
+            try:
+                mdatavcount = mdata_mod.obs[surveyor.chip_key_prop].value_counts()
+            except KeyError:
+                raise KeyError(f"Chip key property {surveyor.chip_key_prop} not found in the obs.columns of the " \
+                               f"mdata[{mod}]. Please check your mdata and surveyor object.")  
+            if not chipvcount.equals(mdatavcount):
+                raise ValueError(f"Value counts for chip key property {surveyor.chip_key_prop} in mdata[{mod}] " \
+                                 "do not match those expected from the surveyor object. Please check your mdata and " \
+                                 "surveyor object.")
+        
+        return True
+    
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"File {path} does not exist.")
+
+    surveyor = pklop(path)
+
+    if mdata is None and mdata_path is None:
+        if any([surveyor.callers[k].spatial.run['add_mods'] for k in surveyor.callers]):
+            warnings.warn("No mdata or mdata_path provided. Returning Surveyor object without loading mdata. " \
+                          "Spatial callers will not have mdata nor spmods set. Please re-run with mdata or mdata_path" \
+                          " and/or rerun call_cells() to recompute these attributes.")
+        return surveyor
+    else:
+        if mdata is not None:
+            if not isinstance(mdata, md.MuData):
+                raise TypeError("mdata must be a MuData object.")
+        else:
+            mdata_path = Path(mdata_path)
+            if not mdata_path.exists():
+                raise FileNotFoundError(f"Mdata path {mdata_path} does not exist.")
+            if use_io2:
+                mdata = io2_read_data(mdata_path)
+            else:
+                mdata = io_read_data(mdata_path)
+        validate_compatibility(surveyor, mdata)
+        surveyor.mdata = mdata
+        for chipnum in surveyor.normers:
+            normer = surveyor.normers[chipnum]
+            normer.mdata = mdata
+        for chipnum in surveyor.callers:
+            caller = surveyor.callers[chipnum]
+            caller.mdata = mdata
+            if caller.spatial.run['add_mods']:
+                caller.add_mods() # This will set the spmods attribute for each caller
+        for chipnum in surveyor.positioners:
+            positioner = surveyor.positioners[chipnum]
+            positioner.mdata = mdata
+        return surveyor

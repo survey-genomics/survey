@@ -6,17 +6,18 @@ from typing import (
 )
 import warnings
 import itertools as it
+import uuid
 
 # Standard libs
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
-from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Polygon
 import matplotlib.image as mpimg
-from scipy import ndimage
 from scipy.sparse import csr_matrix
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import convolve, gaussian_filter, binary_fill_holes
 from multiprocessing import Pool
 
 # Single-cell libs
@@ -28,12 +29,12 @@ from survey.singlecell.decorate import (
     decorate_scatter, get_add_legend_pm, get_pm,
     get_text_position_vals, get_add_plotlabel_pm
 )
-from survey.singlecell.obs import get_obs_df
+from survey.singlecell.obs import get_obs_df, transfer_obs
 from survey.singlecell.datatypes import determine_data
 from survey.spatial.core import validate_chipnums, validate_spatial_mdata
 from survey.genutils import get_config, get_mask, is_listlike, normalize
 from survey.genplot import subplots, create_alpha_cmap
-from survey.singlecell.meta import get_cat_dict
+from survey.singlecell.meta import get_cat_dict, reset_meta_keys, add_colors
 from survey.spatial.segutils import get_seg_keys
 
 AxisLimits = Tuple[Tuple[float, float], Tuple[float, float]]
@@ -623,6 +624,8 @@ def cellmap(mdata: md.MuData,
                 raise ValueError(f"Param `cmap` string '{cmap}' is not a valid matplotlib colormap name.")
         elif not isinstance(cmap, mpl.colors.Colormap):
             raise ValueError("Param `cmap` must be a valid matplotlib colormap instance.")
+    elif dtypes['color']['type'] is None:
+        color = 'k'
 
     ax = _add_cells(masked_mdata, color, ax, cmap, norm, dtypes, basis, layer, **kwargs)
     
@@ -742,9 +745,9 @@ class Reinforcement:
         wrap = True
 
         if wrap: 
-            ndimage.convolve(mc, kernel_c, output=self.lap_c, mode='wrap')
+            convolve(mc, kernel_c, output=self.lap_c, mode='wrap')
         else:    
-            ndimage.convolve(mc, kernel_c, output=self.lap_c, mode='reflect')
+            convolve(mc, kernel_c, output=self.lap_c, mode='reflect')
 
         self.c_reg = mc + ((threshold - self.width - mc) * (threshold - mc) * (threshold + self.width - mc) * g + self.scale * self.lap_c) * self.delta_t
 
@@ -2641,7 +2644,6 @@ class DiffusionVisualizer:
         return fig, axes
 
 
-
 def get_vertices(mdata, chipnum, method='printed', xy=None, context=0):
     """
     Get the vertices of a rectangular region on a chip.
@@ -2725,3 +2727,357 @@ def get_vertices(mdata, chipnum, method='printed', xy=None, context=0):
     verts = verts[[0, 1, 3, 2]]
 
     return ids, extent, verts, lims
+
+
+def get_well_outline_verts(mdata, chipnum):
+    '''
+    Get the outline vertices of the well array for a given chip number.
+
+    Parameters
+    ----------
+    mdata : MuData
+        The MuData object containing the spatial data.
+    chipnum : int
+        The chip number to extract outline vertices for.
+
+    Returns
+    -------
+    outline_verts : np.ndarray
+        An array of (x, y) coordinates representing the outline vertices of the well array,
+        returned as a flat list of (x, y) tuples of length (nrows + 1)*(ncols + 1), in 
+        column major order. 
+    '''
+
+    validate_spatial_mdata(mdata)
+    chipset = mdata['xyz'].uns['survey']
+    chipnums = validate_chipnums(chipset, chipnum)
+    if len(chipnums) > 1:
+        raise ValueError("Only one chip number is allowed.")
+    chipnum = chipnums[0]
+
+    chipset = mdata['xyz'].uns['survey']
+    array = chipset.chips[chipnum].array
+
+    # Get_wall_verts() returns horizontal walls first, then vertical walls
+    wall_verts = array.get_wall_verts()
+    nrows, ncols = array.arr_shape
+
+    yverts, xverts = wall_verts[:nrows + 1], wall_verts[nrows + 1:]
+    if not len(xverts) == ncols + 1:
+        raise ValueError("Number of xverts does not match number of columns + 1")
+    outline_verts = np.array(list(it.product([(i[0][0] + i[-1][0])//2 for i in xverts], [(i[0][1] + i[1][1])//2 for i in yverts])))
+    
+    return outline_verts
+
+
+def get_niche_outlines(mdata, chipnum, niches, vertex_list, color=None, **kwargs):
+    """
+    Generates Matplotlib Polygons outlining contiguous "niches" of wells.
+
+    Parameters:
+    -----------
+    mdata : MuData
+        The MuData object containing the spatial data.
+    chipnum : int
+        The chip number to extract niches for.
+    niches : dict
+        Key: niche ID (str or int)
+        Value: List of (row, col) tuples representing wells in the niche.
+    vertex_list : list of tuples
+        List of (x, y) coordinates for each vertex in the well array,
+        ordered in column-major order.
+    kwargs : dict
+        Additional keyword arguments to pass to the Polygon constructor.
+
+    Returns:
+    --------
+    dict
+        Key: niche ID
+        Value: List of Matplotlib Polygon objects outlining the niche.
+
+    """
+    default_color = 'black'
+
+    if color is not None:
+        if 'edgecolor' in kwargs:
+            warnings.warn("Both 'color' and 'edgecolor' (in kwargs) params provided. Param 'color' will take precedence for edge colors.")
+        if isinstance(color, dict):
+            invalid_colors = []
+            for seg_id, seg_color in color.items():
+                if not mpl.colors.is_color_like(seg_color):
+                    invalid_colors.append((seg_id, seg_color))
+            if invalid_colors:
+                error_msg = "Invalid colors for niches:\n"
+                error_msg += "\n".join([f"niche ID: {seg_id}, Color: {seg_color}" for seg_id, seg_color in invalid_colors])
+                raise ValueError(error_msg)
+        elif mpl.colors.is_color_like(color):
+            color = {seg_id: color for seg_id in niches.keys()}
+        else:
+            raise ValueError(f"Invalid color: {color}")
+    else:
+        if 'edgecolor' in kwargs:
+            color = {seg_id: kwargs['edgecolor'] for seg_id in niches.keys()}
+            kwargs.pop('edgecolor')  # Remove edgecolor from kwargs since we're using it in color dict
+        else:
+            color = {seg_id: default_color for seg_id in niches.keys()}
+        
+
+    chipset = mdata['xyz'].uns['survey']
+    array = chipset.chips[chipnum].array
+    grid_shape = array.arr_shape
+
+    nrows, ncols = grid_shape
+    stride = nrows + 1
+    
+    output_polygons = {}
+
+    for seg_id, well_indices in niches.items():
+        # 1. Identify all exterior edges
+        edges = set()
+        
+        for r, c in well_indices:
+            # Calculate vertex indices
+            tl = c * stride + r
+            bl = c * stride + (r + 1)
+            tr = (c + 1) * stride + r
+            br = (c + 1) * stride + (r + 1)
+            
+            # Counter-Clockwise edges
+            well_edges = [
+                (tl, bl), (bl, br), (br, tr), (tr, tl)
+            ]
+            
+            for edge in well_edges:
+                reverse_edge = (edge[1], edge[0])
+                if reverse_edge in edges:
+                    edges.remove(reverse_edge)
+                else:
+                    edges.add(edge)
+        
+        # 2. Stitch edges into loops
+        # Use a dict of lists to handle vertices with multiple outgoing edges
+        # (e.g., touching corners in a checkerboard pattern)
+        adjacency = {}
+        for u, v in edges:
+            if u not in adjacency:
+                adjacency[u] = []
+            adjacency[u].append(v)
+        
+        loops = []
+        
+        while adjacency:
+            # Start a new loop from an arbitrary remaining edge
+            start_node = next(iter(adjacency))
+            current_node = start_node
+            
+            loop_coords = []
+            
+            while True:
+                loop_coords.append(vertex_list[current_node])
+                
+                # Get valid neighbors for the current node
+                if current_node not in adjacency:
+                    # This implies a broken path or non-closed geometry logic error,
+                    # but strictly shouldn't happen in valid grid topology.
+                    break
+                    
+                neighbors = adjacency[current_node]
+                
+                # Pop one outgoing edge. 
+                # If there are multiple (touching corners), we just pick the last one added.
+                next_node = neighbors.pop()
+                
+                # Clean up empty keys to prevent infinite loops in outer while
+                if not neighbors:
+                    del adjacency[current_node]
+                
+                current_node = next_node
+                
+                # If we return to start, the loop is closed
+                if current_node == start_node:
+                    break
+            
+            loops.append(loop_coords)
+
+        # 3. Convert loops to Polygons
+        poly_patches = []
+        for loop in loops:
+            poly = Polygon(loop, closed=True, edgecolor=color.get(seg_id, default_color), **kwargs)
+            poly_patches.append(poly)
+            
+        output_polygons[seg_id] = poly_patches
+
+    return output_polygons
+
+
+def plot_niches(mdata, chipnum, niches, mod, subset=None, 
+                  size=1.0, niche_col_name='spatial_niche', chipnum_col_name='rna:chip-num', 
+                  plot_pies=True, plot_pies_kwargs=None,
+                  plot_outlines=False, outline_fill_holes=True, outlines_kwargs=None,
+                  legend=True,
+                  plot_array=True, plot_array_kwargs=None,
+                  plot_background=True, plot_background_kwargs=None):
+    '''
+    Plots spatial niches on a chip, with options for pie charts and outlines.
+
+    Parameters
+    ----------
+    mdata : MuData
+        The MuData object containing the spatial data.
+    chipnum : int
+        The chip number to plot niches for.
+    niches : list
+        List of niche identifiers to plot.
+    mod : str, optional
+        The modality in mdata where the spatial niche information is stored. With niche_col_name, will 
+        be the name used for column that's transfered to/identified in the `xyz` modality.
+    subset : dict, optional
+        A dictionary specifying subsets of the data to plot, in the format {mod: {col_name: [values]}}. 
+        Default is None (no subsetting).
+    size : float, optional
+        The size of the plotted points. Default is 1.0.
+    niche_col_name : str, optional
+        The name of the column in mdata.obs that contains spatial niche identifiers. 
+        Default is 'spatial_niche'.
+    chipnum_col_name : str, optional
+        The name of the column in mdata.obs that contains chip number identifiers. 
+        Default is 'rna:chip-num'.
+    plot_pies : bool, optional
+        Whether to plot pie charts representing niche composition. Default is True.
+    plot_pies_kwargs : dict, optional
+        Additional keyword arguments to pass to the pie chart plotting function. Default is None.
+    plot_outlines : bool, optional
+        Whether to plot outlines around niches. Default is False.
+    outline_fill_holes : bool, optional
+        Whether to fill holes in the niche outlines. Default is True.
+    outlines_kwargs : dict, optional
+        Additional keyword arguments to pass to the outline plotting function. Default is None.
+    plot_array : bool, optional
+        Whether to plot the well array. Default is True.
+    plot_array_kwargs : dict, optional
+        Additional keyword arguments to pass to the array plotting function. Default is None.
+    plot_background : bool, optional
+        Whether to plot the background hoodmap. Default is True.
+    plot_background_kwargs : dict, optional
+        Additional keyword arguments to pass to the background plotting function. Default is None.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The Matplotlib figure object containing the plot.
+    ax : matplotlib.axes.Axes
+        The Matplotlib axes object containing the plot.
+
+    Notes
+    -----
+    This function subsets the data for the specified chip number and creates a copy in memory. Make sure
+    that there is enough memory to hold this copy, especially if the original mdata is large. 
+
+
+    TODO:
+    - Avoid creating copy in memory using try/except/finally block to attempt plot and clean up pulled columns.
+    '''
+
+    if 'legend' in plot_pies_kwargs and plot_pies_kwargs['legend'] != legend:
+        warnings.warn("plot_pies_kwargs contains 'legend' set to False, but 'legend' is set to True and takes precedence.")
+    
+
+    none_id = str(uuid.uuid4())[:8]
+    other_id = str(uuid.uuid4())[:8]
+    filter_col_name = str(uuid.uuid4())[:8]
+
+    submdata = mdata[mdata.obs[chipnum_col_name] == chipnum].copy()
+
+    transfer_col_name = f'{mod}.{niche_col_name}'
+
+    if transfer_col_name not in submdata['xyz'].obs.columns:
+        transfer_obs(submdata, mods=(mod, 'xyz'), columns=[niche_col_name], overwrite=True)
+
+    all_niches = submdata[mod].obs[niche_col_name].cat.categories   
+
+    mapper = dict(it.product(all_niches.difference(niches), (other_id,)))
+    mapper.update(dict(zip(niches, niches)))
+
+    submdata['xyz'].obs[filter_col_name] = submdata['xyz'].obs[transfer_col_name].map(mapper).fillna(none_id).astype('category')
+
+    submdata.pull_obs(mods='xyz', columns=[filter_col_name])
+
+    reset_meta_keys(submdata['xyz'], [transfer_col_name, filter_col_name])
+    for key in [transfer_col_name, filter_col_name]:
+        add_colors(submdata['xyz'], key, overwrite=True)
+    
+    if plot_outlines:
+        chip = submdata['xyz'].uns['survey'].chips[chipnum]
+        outline_verts = get_well_outline_verts(mdata, chipnum=chipnum)
+        welldata = chip.get_welldata()
+        color_dict = get_cat_dict(submdata['xyz'], filter_col_name, prop='color')
+        if outline_fill_holes:
+            niches2locs = submdata['xyz'].obs[['arr-row', 'arr-col', transfer_col_name]].dropna().drop_duplicates().reset_index(drop=True)
+            niches2locs = niches2locs.groupby(transfer_col_name, observed=True)[['arr-row', 'arr-col']].apply(lambda df: df.values.tolist()).to_dict()
+            
+            zero_arr = np.zeros(chip.array.arr_shape, dtype=int)
+            niches2wells = {}
+            welldata_locs = welldata.reset_index().set_index(['arr-row', 'arr-col'])['id']
+            for spniche, locs in niches2locs.items():
+                niche_arr = zero_arr.copy()
+                for r, c in locs:
+                    niche_arr[r, c] = 1
+                # Fill holes
+                niche_arr = binary_fill_holes(niche_arr)
+                # Get well indices for the niche
+                well_indices = list(map(tuple,np.argwhere(niche_arr)))
+                niches2wells[spniche] = welldata_locs.loc[well_indices].values.tolist()
+
+        else:
+            niches2wells = submdata['xyz'].obs[['id', transfer_col_name]].dropna().drop_duplicates().reset_index(drop=True)
+            niches2wells = niches2wells.groupby(transfer_col_name, observed=True)['id'].apply(list).to_dict()
+
+        xy = chip.array.wells[['x', 'y']]
+        wall_dist = (chip.array.w/chip.array.pitch)
+        half_well_dist = 0.5*(chip.array.s/chip.array.pitch)
+        lims = dict(zip(['x', 'y'], zip(xy.min() - half_well_dist - wall_dist, xy.max() + half_well_dist + wall_dist)))
+        lerper = get_lerper((chip.array.lims['x'], chip.array.lims['y']), (lims['x'], lims['y']))
+        
+        niche_locs = {spniche: welldata.loc[niches2wells[spniche]][['arr-row', 'arr-col']].values for spniche in niches}
+        outline_verts_lerped = [lerper(p) for p in outline_verts]
+
+        protected_outlines_kwargs = {'chipnum', 'niches', 'vertex_list', 'fill'}
+        default_config = {'fill': False, 'color': color_dict, 'linewidth': 1}
+        outlines_kwargs = get_config(outlines_kwargs, default_config, protected=protected_outlines_kwargs)
+        niche_outlines = get_niche_outlines(mdata, chipnum=chipnum, niches=niche_locs, 
+                                               vertex_list=outline_verts_lerped, **outlines_kwargs)
+
+    fig, ax = subplots(1, fss=10)
+    if plot_array:
+        default_config = {'walls': True, 'units': 'w'}
+        config = get_config(plot_array_kwargs, default_config, protected={'chip-num', 'units', 'ax'})
+        ax = arrplot(submdata, chipnum=chipnum, ax=ax, **config)
+    if plot_background:
+        circleprops={'facecolor': 'darkgray'}
+        default_config = {'units': 'w', 'subset': subset, 'circleprops': circleprops, 'color': None, 'size': {1: size, 2: size}}
+        config = get_config(plot_background_kwargs, default_config, protected={'chip-num', 'units', 'ax'})
+        ax = hoodmap(submdata, chipnum=chipnum, ax=ax, **config)
+
+    if plot_pies or plot_outlines:
+        pulled_filter_col_name = f'xyz:{filter_col_name}'
+        submdata_exclude = submdata[~submdata.obs[pulled_filter_col_name].isin([other_id, none_id])]
+        if legend:
+            show_all_cats = submdata_exclude.obs[pulled_filter_col_name].cat.categories.difference([other_id, none_id])
+            default_legend_params = {'pos': 'TR2', 'show_all_cats': show_all_cats}
+
+    if plot_pies:
+        default_config={'legend_params': default_legend_params, 'units': 'w', 'subset': subset, 'size': size}
+        if legend:
+            default_config['legend'] = True
+        config = get_config(plot_pies_kwargs, default_config, protected={'size', 'chip-num', 'units', 'color', 'ax'})
+        ax = hoodmap(submdata_exclude, chipnum=chipnum, color=filter_col_name, ax=ax, **config)
+
+    if plot_outlines:
+        for spniche, polygons in niche_outlines.items():
+            for poly in polygons:
+                ax.add_patch(poly)
+        if not plot_pies and legend:
+            config = get_add_legend_pm().get_params(default_legend_params)
+            decorate_scatter(ax, config=config, plot_type='legend', cdict=color_dict)
+
+    return fig, ax

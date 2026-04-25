@@ -809,7 +809,10 @@ def spec_expr(adata: sc.AnnData,
                 'Please remove p_expr from adata.uns and re-run.')
         add_p_expr, vcounts = check_p_expr(adata, key, mode='validate')
 
-    X = adata.layers[layer]
+    if layer is None:
+        X = adata.X
+    else:
+        X = adata.layers[layer]
     if not isinstance(X, csr_matrix):
         X = csr_matrix(X)
 
