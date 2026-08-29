@@ -9,4 +9,4 @@ from . import process as pr
 from . import celltype as ct
 from . import plotting as pl
 from . import matrix as mx
-from . import plotopt as po
+# from . import plotopt as po
