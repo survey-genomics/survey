@@ -1704,3 +1704,384 @@ def get_hpa_single_cell_data(
         return results
     else:
         return results[tissues[0]]
+
+
+class AnnoState:
+
+
+    class LitSource:
+
+        def __init__(self, name, link, title=None, excerpt=None):
+            """
+            Initializes a LitSource object representing a scientific literature source.
+
+            Parameters
+            ----------
+            name : str
+                The name of the source (e.g., author name or journal).
+            link : str
+                The URL link to the source document. Must be a valid URL starting with 
+                http://, https://, or www.
+            title : str, optional
+                The title of the literature source.
+            excerpt : str, optional
+                A short excerpt or abstract from the source.
+
+            Raises
+            ------
+            ValueError
+                If `link` is not a valid URL string.
+                If `title` is provided but is not a string.
+                If `excerpt` is provided but is not a string.
+            """
+            self.name = name
+            if not self.is_url(link):
+                raise ValueError('link must be a valid URL string')
+            self.link = link
+            if title is not None and not isinstance(title, str):
+                raise ValueError('title must be a string if provided')
+            self.title = title
+            if excerpt is not None and not isinstance(excerpt, str):
+                raise ValueError('excerpt must be a string if provided')
+            self.excerpt = excerpt
+
+        def __repr__(self):
+            return f'LitSource(name={self.name}, link={self.link}, title={self.title}, excerpt={self.excerpt})'
+
+        def __str__(self):
+            return f'{self.name} ({self.link}) - {self.title}, {self.excerpt}'
+        
+        @staticmethod
+        def is_url(s: str) -> bool:
+            """
+            Validates if a given string is a URL.
+
+            Parameters
+            ----------
+            s : str
+                The string to be checked.
+
+            Returns
+            -------
+            bool
+                True if the string starts with 'http://', 'https://', or 'www.' 
+                (case-insensitive), False otherwise.
+            """
+            return bool(re.match(r'https?://|www\.', s, re.IGNORECASE))
+
+
+    class GeneLit:
+
+        def __init__(self, genes, source, name=None):
+            """
+            Initializes a GeneLit object linking a gene set to its literature source.
+
+            Parameters
+            ----------
+            name : str
+                The name of the gene set.
+            genes : str or list of str
+                A single gene name as a string or a list of gene names associated with the 
+                literature source.
+            source : AnnoState.LitSource
+                The literature source associated with the gene.
+            name : str, optional
+                If genes is a single gene name, name will be set to that gene name. 
+                Otherwise, name must be provided as a string.
+
+            Raises
+            ------
+            ValueError
+                If `name` is not a string.
+                If `genes` is a string and `name` is not provided, `name` will be set to the gene name.
+                If `genes` is a list of strings and `name` is not provided, raises a ValueError.
+                If `source` is not an instance of `AnnoState.LitSource`.
+            """
+            if isinstance(genes, str):
+                self.genes = [genes]
+                self.name = genes
+            elif isinstance(genes, list) and all(isinstance(gene, str) for gene in genes):
+                self.genes = genes
+                if name is None:
+                    raise ValueError('If genes is a list of strings, name must be provided as a string')
+                self.name = name
+            else:
+                raise ValueError('genes must be either a string or a list of strings')
+            if not isinstance(source, AnnoState.LitSource):
+                raise ValueError('source must be an instance of AnnoState.LitSource')
+            self.source = source
+            
+        
+        def __repr__(self):
+            return f'GeneLit(name={self.name}, source={self.source})'
+
+        def __str__(self):
+            return f'{self.name} ({self.source})'
+    
+    
+    class Annotation:
+
+        def __init__(self, ct, genelist, desc=None):
+            """
+            Initializes an Annotation object for a specific cell type and gene list.
+
+            Parameters
+            ----------
+            ct : str
+                The cell type being annotated.
+            genelist : list of {AnnoState.GeneLit, str}
+                A list of gene names or `GeneLit` objects associated with the cell type.
+            desc : str, optional
+                A text description of the annotation.
+
+            Raises
+            ------
+            ValueError
+                If `ct` is not a string.
+                If `genelist` is not a list, or contains elements that are neither strings 
+                nor `GeneLit` objects.
+                If `desc` is provided but is not a string.
+            """
+
+            if not isinstance(ct, str):
+                raise ValueError('ct must be a string')
+            if not isinstance(genelist, list) or not all(isinstance(gene, (AnnoState.GeneLit, str)) for gene in genelist):
+                raise ValueError('genelist must be a list of GeneLit objects or strings')
+            if desc is not None and not isinstance(desc, str):
+                raise ValueError('desc must be a string if provided')
+            
+            self.ct = ct
+            self.desc = desc
+            self.genelist = genelist
+
+        def __repr__(self):
+            return f'Annotation(ct={self.ct}, genelist={self.genelist}, desc={self.desc})'
+
+        def __str__(self):
+            return f'{self.ct} ({self.genelist}) - {self.desc if self.desc else ""}'
+        
+        def get_gene_names(self):
+            """
+            Extracts and returns the raw gene names from the internal gene list.
+
+            Returns
+            -------
+            list of str
+                A list containing string names of all genes in the annotation.
+            """
+            gene_names = []
+            for gene in self.genelist:
+                if isinstance(gene, AnnoState.GeneLit):
+                    gene_names.extend([gene_name for gene_name in gene.genes])
+                else:
+                    gene_names.append(gene)
+            return gene_names
+
+        def copy(self):
+            """
+            Creates a shallow copy of the annotation instance.
+
+            Returns
+            -------
+            AnnoState.Annotation
+                A new `Annotation` object with a copy of the gene list.
+            """
+            return AnnoState.Annotation(self.ct, self.genelist.copy(), self.desc)
+        
+
+    def __init__(self, adata, col='leiden', ctgrans=None, overwrite=False):
+        """
+        Initializes the AnnoState object for cell type annotations on AnnData objects.
+
+        Parameters
+        ----------
+        adata : sc.AnnData
+            The annotated data matrix containing cell observations.
+        col : str, default 'leiden'
+            The column name in `adata.obs` representing cell clusters.
+        ctgrans : list of str, optional
+            A list of target cell type labels to annotate. Defaults to 
+            `['ct1', 'ct2', 'ct3']`.
+        overwrite : bool, default False
+            If True, permits overwriting cell type categories that already exist in 
+            `adata.obs[col]`.
+
+        Raises
+        ------
+        ValueError
+            If `ctgrans` is not a list of strings.
+            If `adata` is not an `AnnData` object.
+            If `col` is not a string or is missing from `adata.obs`.
+            If `adata.obs[col]` is not a categorical column.
+            If target cell types exist in the categorical column and `overwrite` is False.
+        """
+        if ctgrans is None:
+            ctgrans = ['ct1', 'ct2', 'ct3']
+        else:
+            if not isinstance(ctgrans, list) or not all(isinstance(ctgran, str) for ctgran in ctgrans):
+                raise ValueError('ctttypes must be a list of cell type names (strings)')
+        
+        if not isinstance(adata, sc.AnnData):
+            raise ValueError('adata must be an AnnData object')
+        if not isinstance(col, str):
+            raise ValueError('col must be a string')
+        if col not in adata.obs.columns:
+            raise ValueError(f'{col} is not a column in adata.obs')
+        elif not isinstance(adata.obs[col].dtype, pd.CategoricalDtype):
+            raise ValueError(f'{col} must be a categorical column in adata.obs')
+
+        if any([ctgran in adata.obs[col].cat.categories for ctgran in ctgrans]):
+            if not overwrite:
+                raise ValueError('Some cell types are already present in the categorical column. Set overwrite=True to overwrite existing annotations.')
+            else:
+                overwrite = {}
+                for ctgran in ctgrans:
+                    if ctgran in adata.obs[col].cat.categories:
+                        overwrite[ctgran] = True
+                    else:
+                        overwrite[ctgran] = False
+                print(f'Will overwrite existing annotations for cell types: {[ctgran for ctgran, ow in overwrite.items() if ow]}')
+
+        self.annotations = {}
+        self.annots = {clust: {ct: None for ct in ctgrans} for clust in adata.obs[col].cat.categories}
+        self.adata = adata
+        self.col = col
+        self.ctgrans = ctgrans
+
+
+    def __str__(self):
+        return f'AnnoState object for adata object {self.adata.shape} with\n' \
+                f'  column "{self.col}" containing {len(self.annots)} clusters and\n' \
+                f'  {len(self.ctgrans)} typing levels with {len(self.annotations)} annotations registered'
+    
+
+    def __repr__(self):
+        return self.__str__()
+
+
+    def add_annotation(self, ct, genelist, desc=None):
+        """
+        Registers a new global cell type annotation in the project configuration.
+
+        Parameters
+        ----------
+        name : str
+            The unique identifier key for this annotation group.
+        ct : str
+            The associated cell type name.
+        genelist : list of {AnnoState.GeneLit, str}
+            A list of marker genes or `GeneLit` references.
+        desc : str, optional
+            A text description explaining the annotation.
+
+        Raises
+        ------
+        ValueError
+            If an annotation with the given `ct` already exists.
+            If any gene name in `genelist` is missing from `self.adata.var_names`.
+        """
+
+        if ct in self.annotations:
+            raise ValueError(f'Annotation with name {ct} already exists. Choose a different name or overwrite existing annotation.')
+        annot = AnnoState.Annotation(ct, genelist, desc)
+        if any([gene_name not in self.adata.var_names for gene_name in annot.get_gene_names()]):
+            missing_genes = [gene_name for gene_name in annot.get_gene_names() if gene_name not in self.adata.var_names]
+            raise ValueError(f'The following genes in the genelist are not present in adata.var_names: {missing_genes}')
+        self.annotations[ct] = annot
+
+
+    def annotate(self, clust, ctgran, annot_name=None, ct=None, genelist=None, desc=None, overwrite=False):
+        """
+        Assigns an annotation to a specific cluster and target cell type slot.
+
+        Parameters
+        ----------
+        clust : str
+            The target cluster index or category name in the dataset.
+        ctgran: str
+            The target cell type annotation level (i.e. granularity).
+        annot_name : str, optional
+            The name of a pre-registered global annotation to apply.
+        ct : str, optional
+            The target cell type category for the cluster. Required if `annot_name` 
+            is not given.
+        genelist : list of {AnnoState.GeneLit, str}, optional
+            The marker gene list. Required if `ct` is provided.
+        desc : str, optional
+            An optional description when establishing an ad-hoc annotation.
+        overwrite : bool, default False
+            If True, replaces existing annotations assigned to the cluster and cell type.
+
+        Raises
+        ------
+        ValueError
+            If `clust` is not a valid recognized cluster.
+            If `ct` is not in the recognized target cell types.
+            If an assignment exists for the cluster-cell type mapping and `overwrite` is False.
+            If `annot_name` is absent but `ct` or `genelist` are missing.
+            If `annot_name` is provided but does not match any registered annotation.
+            If `ct` is provided without a `genelist`.
+            If both `annot_name` and `ct`/`genelist` parameters are provided.
+        """
+
+        if clust not in self.annots:
+            raise ValueError(f'{clust} is not a valid cluster in the categorical column')
+        if ctgran not in self.annots[clust]:
+            raise ValueError(f'{ctgran} is not a valid cell type annotation level for cluster {clust}')
+        if self.annots[clust][ctgran] is not None and not overwrite:
+            raise ValueError(f'Annotation for cluster {clust} and cell type annotation level {ctgran} already exists. Set overwrite=True to overwrite existing annotation.')
+
+        if annot_name is None:
+            if ct is None or genelist is None:
+                raise ValueError('If annot_name is not provided, ct and genelist must be provided')
+        else:
+            if annot_name not in self.annotations:
+                raise ValueError(f'No annotation found with name {annot_name}')
+            else:
+                annot = self.annotations[annot_name]
+
+        if ct is not None:
+            if genelist is None:
+                raise ValueError('If ct is provided, genelist must also be provided')
+            if annot_name is not None:
+                raise ValueError('Cannot provide both annot_name and ct/genelist. Choose one or the other.')
+            if ct not in self.annotations:
+                self.add_annotation(ct, genelist, desc)
+            annot = self.annotations[ct]
+
+        self.annots[clust][ctgran] = annot
+
+
+    def apply(self):
+        """
+        Applies annotations to the AnnData object.
+
+        """
+
+        # Ensure there are no Nones left in the annots dictionary for any cluster and cell type annotation level.
+        missing_annotations = []
+        for clust in self.annots:
+            for ctgran in self.annots[clust]:
+                if self.annots[clust][ctgran] is None:
+                    missing_annotations.append((clust, ctgran))
+        if missing_annotations:
+            raise ValueError(f'The following cluster and cell type annotation level combinations are missing annotations: '
+                            f'{missing_annotations}. Please assign annotations to all cluster and cell type annotation level '
+                            f'combinations before applying.')
+
+
+        for ctgran in self.ctgrans:
+            self.adata.obs[ctgran] = self.adata.obs[self.col].astype(str)
+            for clust in self.annots:
+                annot = self.annots[clust][ctgran]
+                gene_names = annot.get_gene_names()
+                self.adata.obs.loc[self.adata.obs[self.col] == clust, ctgran] = annot.ct
+            self.adata.obs[ctgran] = self.adata.obs[ctgran].astype('category')
+
+        
+        self.adata.uns['annotations'] = {
+            'annots': self.annots.copy(),
+            'annotations': self.annotations.copy()
+        }
+        
+        

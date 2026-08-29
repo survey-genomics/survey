@@ -28,6 +28,10 @@ from survey.spatial.core import Chip, ChipSet
 from survey.genutils import is_listlike, get_config, pklop
 from survey.genplot import create_gif_from_pngs
 
+# Testing SpatialNormalizer2
+from scipy.optimize import curve_fit, nnls
+from scipy.sparse import SparseEfficiencyWarning
+
 
 def validate_mdata_chipset(mdata: md.MuData,
                            chipset: Optional[ChipSet] = None,
@@ -882,6 +886,232 @@ class SpatialNormalizer:
                 self.mdata[bctype].X[np.ix_(row_indices, col_indices)] = self.counts[spidx].values
                 
 
+class SpatialNormalizer2:
+    """
+    A class to normalize spatial barcode counts using spatial deconvolution (NNLS).
+
+    This models the barcode bleeding as a physical diffusion process (Gaussian decay)
+    coupled with a manufacturing bias (over-representation), solving for the true
+    counts using a transition matrix.
+
+    This is an alternative to the iterative neighbor-based approach in `SpatialNormalizer`, 
+    written by Gemini Pro AI Model.
+
+    """
+
+    def __init__(self,
+                 mdata,
+                 chip,
+                 chip_key_prop='chip-num',
+                 bctypes=None,
+                 seg_col=None,
+                 min_anchor_conf=0.8):
+        """
+        Parameters
+        ----------
+        mdata, chip, chip_key_prop, bctypes: Same as SpatialNormalizer.
+        seg_col : str, optional
+            The column in `chip.seg` (or welldata) representing tissue area or nuclei count.
+            Used to calculate manufacturing bias. If None, bias is assumed to be uniform (1.0).
+        min_anchor_conf : float, optional
+            The minimum proportion of counts a cell must have in its top barcode to be
+            considered an "anchor cell" for diffusion fitting.
+        """
+        
+        self.mdata = mdata
+        self.chip = chip
+        self.chip_key_prop = chip_key_prop
+        self.bctypes = bctypes if bctypes is not None else chip.layout.bctypes
+        self.seg_col = seg_col
+        self.min_anchor_conf = min_anchor_conf
+        self.layout = self.chip.layout
+        self.welldata = self.chip.get_welldata()
+
+        # Isolate counts just like the original normalizer
+        self.counts = {}
+        for spidx, bctype in enumerate(self.layout.bctypes):
+            if bctype not in self.bctypes:
+                continue
+            cbc_bool = mdata[bctype].obs[chip_key_prop].isin([chip.num])
+            var_bool = chip.layout.mappers[spidx].index
+            self.counts[spidx] = mdata[bctype][cbc_bool, var_bool].to_df()
+            self.counts[spidx].columns = self.counts[spidx].columns.map(self.layout.mappers[spidx].to_dict())
+
+
+    def __getstate__(self):
+        # Copy the object's state from self.__dict__
+        state = self.__dict__.copy()
+        # Remove the large object references
+        if 'mdata' in state:
+            del state['mdata']
+        return state
+
+
+    def __setstate__(self, state):
+        # Restore instance attributes
+        self.__dict__.update(state)
+        # Re-initialize the large objects to None or reload them
+        self.mdata = None
+
+
+    def __repr__(self):
+        return f"SpatialNormalizer2(chip={self.chip.num}, bctypes={self.bctypes}, min_anchor_conf={self.min_anchor_conf})"
+
+
+    def __str__(self):
+        return f"SpatialNormalizer2 for Chip {self.chip.num} with barcode types {self.bctypes}"
+    
+
+    def _get_1d_coords(self, spidx):
+        """Extracts the 1D physical coordinate for each barcode in this spatial index."""
+        coord_name = self.layout.coords[spidx] # e.g., 'row' or 'col'
+        
+        # FIX: Group by the integer ID column to match the columns of self.counts
+        bc_to_coord = self.welldata.groupby(f'int-bc-id{spidx}')[f'arr-{coord_name}'].first()
+        return bc_to_coord * self.chip.array.pitch
+
+    def _get_bias(self, spidx):
+        """Calculates the manufacturing bias (counts per unit tissue)."""
+        counts = self.counts[spidx].sum(axis=0) 
+        
+        if self.seg_col and self.seg_col in self.welldata.columns:
+            # FIX: Group by the integer ID column
+            tissue = self.welldata.groupby(f'int-bc-id{spidx}')[self.seg_col].sum()
+            tissue = tissue.reindex(counts.index).fillna(0)
+            
+            b_raw = counts / (tissue + 1e-9)
+            valid = tissue > 0
+            b_raw[~valid] = 0
+            
+            b = b_raw / b_raw[valid].mean()
+            b[~valid] = 1.0 # Default fallback for empty regions
+        else:
+            b = pd.Series(1.0, index=counts.index)
+            
+        return b
+
+    def _get_sigma(self, spidx, bias):
+        """Finds anchor cells and fits a Gaussian decay to their diffusion profile."""
+        df = self.counts[spidx]
+        totals = df.sum(axis=1)
+        max_counts = df.max(axis=1)
+        top_bcs = df.idxmax(axis=1)
+        
+        # Identify highly-confident anchor cells
+        is_anchor = (max_counts / (totals + 1e-9)) >= self.min_anchor_conf
+        anchors = df[is_anchor]
+        anchor_tops = top_bcs[is_anchor]
+        
+        coords = self._get_1d_coords(spidx)
+        
+        # If no anchor cells meet the criteria, fallback to pitch
+        if anchors.empty:
+            warnings.warn(f"No anchor cells found for spidx {spidx} at confidence {self.min_anchor_conf}. Defaulting sigma to pitch.")
+            return self.chip.array.pitch
+            
+        avg_profiles = anchors.groupby(anchor_tops).mean()
+        
+        dists_list, fracs_list = [], []
+        
+        for true_bc, profile in avg_profiles.iterrows():
+            if true_bc not in coords: continue
+            true_pos = coords[true_bc]
+            
+            # Convert counts to proportions for this anchor group
+            profile_fracs = profile / profile.sum()
+            
+            for obs_bc, frac in profile_fracs.items():
+                if obs_bc not in coords: continue
+                obs_pos = coords[obs_bc]
+                d = np.abs(true_pos - obs_pos)
+                
+                # Correct for manufacturing bias to isolate pure diffusion
+                corrected_frac = frac / bias[obs_bc]
+                dists_list.append(d)
+                fracs_list.append(corrected_frac)
+                
+        # FIX: Safety check to ensure we have data before passing to curve_fit
+        if len(dists_list) == 0:
+            warnings.warn(f"Failed to map anchor profiles to coordinates for spidx {spidx}. Defaulting sigma to pitch.")
+            return self.chip.array.pitch
+            
+        def gaussian_decay(x, sigma):
+            return np.exp(-(x**2) / (2 * sigma**2))
+            
+        try:
+            popt, _ = curve_fit(
+                gaussian_decay, 
+                dists_list, 
+                fracs_list, 
+                p0=[self.chip.array.pitch], 
+                bounds=(1e-5, np.inf)
+            )
+            sigma = popt[0]
+        except Exception as e:
+            warnings.warn(f"Gaussian fit failed for spidx {spidx} ({e}). Defaulting sigma to pitch.")
+            sigma = self.chip.array.pitch
+            
+        return sigma
+
+    def _build_transition_matrix(self, spidx, bias, sigma):
+        """Constructs the row-normalized transition matrix M."""
+        coords = self._get_1d_coords(spidx)
+        bcs = self.counts[spidx].columns
+        N = len(bcs)
+        M = np.zeros((N, N))
+        
+        for i, true_bc in enumerate(bcs):
+            for j, obs_bc in enumerate(bcs):
+                d = np.abs(coords[true_bc] - coords[obs_bc])
+                M[i, j] = np.exp(-(d**2) / (2 * sigma**2)) * bias[obs_bc]
+                
+        # Row normalize so probabilities sum to 1
+        row_sums = M.sum(axis=1, keepdims=True)
+        M = np.divide(M, row_sums, out=np.zeros_like(M), where=row_sums!=0)
+        return M
+
+    def normalize(self):
+        """Calculates parameters and runs NNLS deconvolution on the count matrices."""
+        for spidx in self.counts:
+            print(f"Normalizing spatial index {spidx}...")
+            
+            bias = self._get_bias(spidx)
+            sigma = self._get_sigma(spidx, bias)
+            M = self._build_transition_matrix(spidx, bias, sigma)
+            
+            O = self.counts[spidx].values
+            I_corrected = np.zeros_like(O, dtype=float)
+            
+            # We solve M.T * i = o for each cell's observed counts
+            MT = M.T
+            
+            # Perform NNLS per cell
+            for k in range(O.shape[0]):
+                o_k = O[k, :]
+                if o_k.sum() == 0:
+                    continue
+                # nnls returns the solution and the residual norm
+                i_k, _ = nnls(MT, o_k)
+                I_corrected[k, :] = i_k
+                
+            # Round back to integers to maintain discrete counts
+            I_corrected = np.round(I_corrected).astype(int)
+            
+            # Update MuData in place
+            bctype = self.layout.bctypes[spidx]
+            cbc_bool = self.mdata[bctype].obs[self.chip_key_prop].isin([self.chip.num])
+            row_indices = np.argwhere(cbc_bool.values).flatten()
+            
+            bcs = self.counts[spidx].columns.map({v: k for k, v in self.layout.mappers[spidx].to_dict().items()})
+            col_indices = self.mdata[bctype].var_names.get_indexer_for(bcs)
+            
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SparseEfficiencyWarning)
+                self.mdata[bctype].X[np.ix_(row_indices, col_indices)] = I_corrected
+                
+        print("Normalization complete.")
+
+
 class SpatialCaller:
     """
     A class to call spatial barcodes based on the spatial layout and counts.
@@ -1017,7 +1247,8 @@ class SpatialCaller:
             var_bool = self.chip.layout.mappers[spidx].index
             spmods[spidx] = self.mdata[bctype][cbc_bool, var_bool]
 
-        if not reduce(lambda x, y: x.obs_names.equals(y.obs_names), spmods.values()):
+        ref = next(iter(spmods.values())).obs_names.sort_values()
+        if not all(mod.obs_names.sort_values().equals(ref) for mod in spmods.values()):
             raise ValueError(
                 "Cell barcodes are not consistent across barcode types for the specified chip. "
                 "Please run validate_mdata_chipset to identify the issue."
@@ -1922,7 +2153,7 @@ class Survey:
         return f"Survey object with {len(self.chipset.chips)} chips"
 
 
-    def normalize_counts(self, bctypes=None):
+    def normalize_counts(self, use_SN2=False, bctypes=None):
         # save_gifs_dir=None, **kwargs
         """
         Normalize the counts in the spatial adatas.
@@ -1941,10 +2172,12 @@ class Survey:
 
             chip = self.chipset.chips[chip_num]
 
-            normer = SpatialNormalizer(self.mdata, chip, chip_key_prop=self.chip_key_prop, bctypes=bctypes)
-            
-            # normer.iterate_donations(save_gif_dir=save_gif_dir, **kwargs)
-            normer.iterate_donations()
+            if use_SN2:
+                normer = SpatialNormalizer2(self.mdata, chip, chip_key_prop=self.chip_key_prop, bctypes=bctypes)
+            else:
+                normer = SpatialNormalizer(self.mdata, chip, chip_key_prop=self.chip_key_prop, bctypes=bctypes)
+                # normer.iterate_donations(save_gif_dir=save_gif_dir, **kwargs)
+                normer.iterate_donations()
 
             normer.normalize()
 
@@ -1961,6 +2194,26 @@ class Survey:
         """
         Call cells using the spatial calling methods.
         This will modify the counts in place.
+
+        default_metrics_kwargs = {
+            'top_bcs': 5,
+            'gini_eps': 1e-10,
+            'verbose': False
+        }
+
+        default_spatial_call_kwargs = {
+            'method': 'm02',
+            'method_kwargs': {
+                'no_call_qd': no_call_qd,
+                'call_qd': call_qd,
+                'top_bcs': 5,
+                'max_dist': 250,
+                'dist_units': 'um'
+            },
+            'gb': None,
+            'reset': False,
+            'verbose': False
+        }
         """
 
         if chipnums is None:

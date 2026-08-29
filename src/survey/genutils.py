@@ -13,6 +13,7 @@ import textwrap
 # Standard libs
 import numpy as np
 import pandas as pd
+from scipy.optimize import root_scalar
 
 
 def make_logspace(start: Number,
@@ -871,3 +872,172 @@ def get_attrs(obj, public=1):
         return [name for name in dir(obj) if not name.startswith('_')]
     elif public == 2:
         return [name for name in dir(obj) if not name.startswith('_') and not name.endswith('_')]
+    
+
+def sample_rare(data, target_rate, prop_keep_thresh, method='flat', cluster_col=None, min_prop_keep=None, random_state=42):
+    """
+    Subsamples a pandas DataFrame or Series, preserving 100% of rare clusters 
+    while downsampling common clusters to hit an overall target rate using 
+    either a flat rate or an exponential decay curve.
+
+    This function is designed to handle highly skewed datasets (like single-cell 
+    sequencing data) where rare populations must be fully retained, but the overall 
+    dataset size needs to be reduced for performance. 
+
+    Parameters
+    ----------
+    data : pandas.DataFrame or pandas.Series
+        The input data containing cluster assignments. It is assumed to be 
+        indexed by cell barcodes.
+    target_rate : float
+        The desired overall sampling rate for the entire dataset. Must be 
+        strictly between 0 and 1.
+    prop_keep_thresh : float
+        The proportion threshold (0 to 1) at or below which a cluster is 
+        considered "rare" and 100% of its cells are retained.
+    method : {'flat', 'exponential'}, optional
+        The mathematical model used to downsample the common clusters. 
+        'flat' calculates a single uniform keep rate for all common clusters. 
+        'exponential' applies a decay curve where larger clusters are penalized 
+        more heavily, asymptoting toward `min_prop_keep`. Default is 'flat'.
+    cluster_col : str, optional
+        The name of the column containing cluster identities. This is required 
+        if `data` is a pandas DataFrame, and ignored if `data` is a Series. 
+        Default is None.
+    min_prop_keep : float, optional
+        The absolute minimum sampling proportion allowed for any single common 
+        cluster. For 'flat', this acts as a hard boundary check. For 'exponential', 
+        this acts as the asymptote for the decay curve (defaults to 0.0 if None). 
+        Default is None.
+    random_state : int, optional
+        Seed for the numpy random number generator to ensure reproducible 
+        stratified sampling. Default is 42.
+
+    Returns
+    -------
+    tuple
+        A tuple containing two elements:
+        
+        - kept_barcodes (numpy.ndarray): A 1D array of the sampled cell 
+        barcodes (drawn from the index of the input data).
+        - stats_df (pandas.DataFrame): A dataframe indexed by the cluster 
+        categories detailing the sampling statistics. Columns include:
+        'original_cell_number', 'original_proportion', 'proportion_kept', 
+        'new_cell_number', and 'new_proportion'.
+
+    Raises
+    ------
+    TypeError
+        If `data` is neither a pandas DataFrame nor a pandas Series.
+    ValueError
+        If `method` is not 'flat' or 'exponential'.
+        If `target_rate` is not strictly between 0 and 1.
+        If `data` is a DataFrame but `cluster_col` is not provided or missing.
+        If preserving 100% of rare cells already exceeds the `target_rate`.
+        If no common cell types are found above the threshold.
+        If the `target_rate` is mathematically impossible to achieve with the 
+        chosen method and constraints (e.g., requires keeping >100% or less 
+        than `min_prop_keep` of common cells).
+    """
+    if method not in ['flat', 'exponential']:
+        raise ValueError("method must be either 'flat' or 'exponential'")
+
+    # 1. Parse input
+    if isinstance(data, pd.DataFrame):
+        if cluster_col is None:
+            raise ValueError("When passing a DataFrame, 'cluster_col' must be specified.")
+        if cluster_col not in data.columns:
+            raise ValueError(f"The column '{cluster_col}' is not present in the DataFrame.")
+        obs_series = data[cluster_col]
+    elif isinstance(data, pd.Series):
+        obs_series = data
+    else:
+        raise TypeError("Input 'data' must be a pandas DataFrame or Series.")
+        
+    if not (0 < target_rate < 1):
+        raise ValueError("target_rate must be strictly between 0 and 1.")
+
+    total_cells = len(obs_series)
+
+    # 2. Get original statistics
+    orig_counts = obs_series.value_counts()
+    orig_props = orig_counts / total_cells
+
+    rare_mask = orig_props <= prop_keep_thresh
+    common_mask = orig_props > prop_keep_thresh
+
+    # Target proportion of the whole dataset we need to pull from common clusters
+    target_common_prop = target_rate - orig_props[rare_mask].sum()
+
+    if target_common_prop < 0:
+        raise ValueError("Target sample rate is too low. Preserving 100% of rare cells already exceeds the target rate.")
+    if not common_mask.any():
+        raise ValueError("No common cell types found above threshold to downsample.")
+
+    keep_rates = pd.Series(1.0, index=orig_props.index)
+
+    # 3. Calculate keep rates based on chosen method
+    if method == 'flat':
+        k_c = target_common_prop / orig_props[common_mask].sum()
+        
+        if k_c > 1.0:
+            raise ValueError("Target sample rate is too high to achieve, even if keeping 100% of common cells.")
+        if min_prop_keep is not None and k_c < min_prop_keep:
+            raise ValueError(f"System overdefined: Flat rate ({k_c:.4f}) falls below min_prop_keep ({min_prop_keep}).")
+            
+        keep_rates[common_mask] = k_c
+
+    elif method == 'exponential':
+        A = min_prop_keep if min_prop_keep is not None else 0.0
+        max_possible_common = orig_props[common_mask].sum()
+        min_possible_common = A * max_possible_common
+        
+        if target_common_prop < min_possible_common:
+            raise ValueError(f"System overdefined: Even decaying to min_prop_keep ({A}), the target rate cannot be reached.")
+        if target_common_prop > max_possible_common:
+            raise ValueError("Target sample rate is too high to achieve.")
+
+        # Objective function to find the decay constant (lambda)
+        def objective(lam):
+            k_i = A + (1.0 - A) * np.exp(-lam * (orig_props[common_mask] - prop_keep_thresh))
+            return np.sum(orig_props[common_mask] * k_i) - target_common_prop
+
+        # Dynamically find upper bound for bisection
+        lam_high = 1.0
+        while objective(lam_high) > 0:
+            lam_high *= 2.0
+            
+        # Find root (lambda)
+        res = root_scalar(objective, bracket=[0, lam_high], method='bisect')
+        lam_sol = res.root
+        
+        keep_rates[common_mask] = A + (1.0 - A) * np.exp(-lam_sol * (orig_props[common_mask] - prop_keep_thresh))
+
+    # 4. Perform stratified sampling
+    rng = np.random.default_rng(random_state)
+    kept_barcodes = []
+    new_counts_dict = {}
+
+    for cluster in orig_counts.index:
+        cluster_cells = obs_series[obs_series == cluster].index.values
+        n_keep = int(np.round(orig_counts[cluster] * keep_rates[cluster]))
+        n_keep = min(n_keep, orig_counts[cluster]) # Failsafe against rounding up past 100%
+
+        if n_keep > 0:
+            sampled_cells = rng.choice(cluster_cells, size=n_keep, replace=False)
+            kept_barcodes.append(sampled_cells)
+        new_counts_dict[cluster] = n_keep
+
+    kept_barcodes = np.concatenate(kept_barcodes)
+
+    # 5. Compile final sampling stats dataframe
+    new_total = sum(new_counts_dict.values())
+    stats_df = pd.DataFrame({
+        'original_cell_number': orig_counts,
+        'original_proportion': orig_props,
+        'proportion_kept': keep_rates,
+        'new_cell_number': pd.Series(new_counts_dict),
+        'new_proportion': pd.Series(new_counts_dict) / new_total if new_total > 0 else 0
+    })
+
+    return kept_barcodes, stats_df

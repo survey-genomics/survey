@@ -107,6 +107,8 @@ def get_obs_df(data: Union[sc.AnnData, md.MuData],
     
     # Create a DataFrame for features
     if features is not None:
+        if layer == 'raw':
+            layer = None
         features_df = data[:, features].to_df(layer=layer)
     else:
         features_df = pd.DataFrame()

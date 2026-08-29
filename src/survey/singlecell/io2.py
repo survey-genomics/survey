@@ -1093,6 +1093,8 @@ def get_ind_adata(adata: sc.AnnData,
 
 
 def make_mudata(experiments: Experiments,
+                concat_kwargs: Dict = None,
+                store_vars: bool = False,
                 verbosity: int = 0) -> md.MuData:
     """
     Create a MuData object from an Experiments object.
@@ -1110,6 +1112,11 @@ def make_mudata(experiments: Experiments,
     experiments : Experiments
         An Experiments object containing all experiment, sample, and tag
         information along with the data_mapper configuration.
+    concat_kwargs : dict, optional
+        Additional keyword arguments to pass to concat_mdatas when concatenating the
+        individual MuData objects.
+    store_vars : bool, default False
+        Passed directly to concat_mdatas, see concat_mdatas documentation for details.
     verbosity : int, default 0
         Internal verbosity level for progress output:
         - 0: Silent
@@ -1142,6 +1149,9 @@ def make_mudata(experiments: Experiments,
     all_metrics = []
     batch_counter = 0
     n_exps = len(experiments)
+
+    if concat_kwargs is None:
+        concat_kwargs = {}
     
     # Track metadata to add to obs
     obs_metadata = []
@@ -1316,7 +1326,7 @@ def make_mudata(experiments: Experiments,
     if len(mdatas) == 1:
         mdata = mdatas[0]
     else:
-        mdata = concat_mdatas(mdatas)
+        mdata = concat_mdatas(mdatas, concat_kwargs=concat_kwargs, store_vars=store_vars)
     
     # Add metadata columns to RNA modality
     if experiments.meta is not None and experiments.add_cols and 'rna' in mdata.mod:
@@ -1370,7 +1380,9 @@ def concat_mdatas(mdatas: List[md.MuData],
         If True and `join=outer` is provided via `concat_kwargs`, stores the specific
         variables present in each adata (or only the adata for which there are concat_kwargs) 
         in `adata.uns['vars_dict']`. If a list-like is provided, it should be the same 
-        length as `mdatas` and will be used as the keys in the `vars_dict`. Default is False.
+        length as `mdatas` and will be used as the keys in the `vars_dict`. If a dict is provided,
+        its keys must match the modalities being concatenated that have specific concat_kwargs.
+        Default is False.
 
     Returns
     -------
@@ -1406,14 +1418,25 @@ def concat_mdatas(mdatas: List[md.MuData],
         if config.get('join', None) == 'outer' and store_vars is not False:
             if store_vars is True:
                 keys = [f"adata_{i}" for i in range(len(adatas_for_mod))]
+                run_store_vars = True
             elif is_listlike(store_vars):
                 if not len(store_vars) == len(adatas_for_mod):
                     raise ValueError("If providing a list-like for `store_vars`, it must match the number of adatas being concatenated.")
                 keys = store_vars
-                store_vars = True
+                run_store_vars = True
+            elif isinstance(store_vars, dict):
+                # print(f"store_vars dict provided: {store_vars}")
+                # print(f"All mods: {all_mods}")
+                # print(f"Concat kwargs keys: {concat_kwargs.keys()}")
+                if not set(store_vars.keys()).issubset(set(all_mods)):
+                    raise ValueError("If providing a dict for `store_vars`, its keys must match the modalities present in the mdatas being concatenated.")
+                if mod not in store_vars:
+                    raise ValueError(f"Modality '{mod}' is being concatenated with specific concat_kwargs but is not a key in the provided `store_vars` dict.")
+                keys = store_vars[mod]
+                run_store_vars = True
             else:
                 raise TypeError(f"`store_vars` must be a bool or list-like if `join='outer'` is used in `concat_kwargs`, not {type(store_vars)}.")
-            if store_vars:
+            if run_store_vars:
                 # Store the specific variables present in each adata in .uns['vars_dict']
                 vars_dict = {key: adata.var_names.tolist() for key, adata in zip(keys, adatas_for_mod)}
                 concatenated[mod].uns['vars_dict'] = vars_dict

@@ -973,7 +973,7 @@ def freq_chart(data: Union[sc.AnnData, pd.DataFrame],
         return ax
     
     def _get_cats(df, group):
-        if isinstance(df[group], pd.CategoricalDtype):
+        if isinstance(df[group].dtype, pd.CategoricalDtype):
             return df[group].cat.categories
         else:
             return df[group].unique()
